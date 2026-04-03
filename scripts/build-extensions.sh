@@ -68,13 +68,8 @@ build_rknpu() {
         --strip-components=1 \
         -C "${WORK_DIR}/pkgs"
 
-    # Inject LLVM vars that our pkg.yaml needs but pkgs Pkgfile may not have
-    if ! grep -q "LLVM_IMAGE" "${WORK_DIR}/pkgs/Pkgfile"; then
-        sed -i "s|^  PKGS:.*|&\n  LLVM_IMAGE: ${LLVM_IMAGE}\n  LLVM_REV: ${LLVM_REV}|" \
-            "${WORK_DIR}/pkgs/Pkgfile"
-    fi
-
     # Copy our extension into the pkgs tree so bldr can resolve stage: kernel-build
+    # LLVM_IMAGE / LLVM_REV are defined in rockchip-rknpu/vars.yaml, not injected here.
     cp -r "${REPO_ROOT}/rockchip-rknpu" "${WORK_DIR}/pkgs/rockchip-rknpu"
 
     local tag="${RKNPU_VERSION}-${KERNEL_VERSION}"

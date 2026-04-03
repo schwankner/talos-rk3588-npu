@@ -1,2 +1,4 @@
 VERSION: "{{ .BUILD_ARG_TAG }}"
 TIER: "contrib"
+LLVM_IMAGE: "ghcr.io/siderolabs/llvm"
+LLVM_REV: "v1.14.0-alpha.0"
