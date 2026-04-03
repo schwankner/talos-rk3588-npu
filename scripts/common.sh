@@ -5,13 +5,15 @@
 set -euo pipefail
 
 # Talos Linux
-TALOS_VERSION="${TALOS_VERSION:-v1.10.4}"
+TALOS_VERSION="${TALOS_VERSION:-v1.12.4}"
 
 # Linux kernel (must match the Talos release above)
-KERNEL_VERSION="${KERNEL_VERSION:-6.12.25-talos}"
+# Verified on Turing RK1 worker (10.0.60.4): uname -r = 6.18.9-talos
+KERNEL_VERSION="${KERNEL_VERSION:-6.18.9-talos}"
 
 # siderolabs/pkgs commit pinned to the Talos release
-PKGS_COMMIT="${PKGS_COMMIT:-}"  # fill in once Talos version is locked
+# Source: https://github.com/siderolabs/talos/blob/v1.12.4/pkg/machinery/gendata/data/pkgs
+PKGS_COMMIT="${PKGS_COMMIT:-b1fc4c6}"
 
 # LLVM toolchain (used for out-of-tree module builds)
 LLVM_IMAGE="${LLVM_IMAGE:-ghcr.io/siderolabs/llvm}"
