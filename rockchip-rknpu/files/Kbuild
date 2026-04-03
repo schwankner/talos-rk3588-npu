@@ -1,10 +1,18 @@
 # Kbuild for rknpu out-of-tree module.
 #
-# Patched from upstream w568w/rknpu-module: rknpu_devfreq.o is removed
-# because the Talos 1.12.x kernel has CONFIG_PM_DEVFREQ=n and does not
-# install linux/devfreq-governor.h.  The rknpu_devfreq.h header already
-# provides correct inline no-op stubs for all devfreq functions when
-# CONFIG_PM_DEVFREQ is not defined, so no functionality is lost.
+# Patched from upstream w568w/rknpu-module:
+#
+# 1. rknpu_devfreq.o is excluded from compilation.
+#    The Talos 1.12.x kernel-build stage exports /src without
+#    include/linux/devfreq-governor.h even though CONFIG_PM_DEVFREQ=y in
+#    autoconf.h, so the .c file cannot be compiled.
+#
+# 2. -DRKNPU_NO_DEVFREQ is added.
+#    With CONFIG_PM_DEVFREQ=y, rknpu_devfreq.h emits real function
+#    *declarations* (not inline stubs), which causes modpost to fail with
+#    "undefined symbol" when the .o is absent.  The author provided
+#    RKNPU_NO_DEVFREQ as an explicit escape hatch: when defined, the header
+#    always emits the inline no-op stubs regardless of CONFIG_PM_DEVFREQ.
 
 obj-m := rknpu.o
 rknpu-y := src/rknpu_drv.o src/rknpu_gem.o src/rknpu_fence.o \
@@ -16,3 +24,4 @@ ccflags-y += -I$(src)/src/include/compat
 ccflags-y += -DCONFIG_ROCKCHIP_RKNPU_DRM_GEM
 ccflags-y += -DCONFIG_ROCKCHIP_RKNPU_DEBUG_FS
 ccflags-y += -DCONFIG_ROCKCHIP_RKNPU_FENCE
+ccflags-y += -DRKNPU_NO_DEVFREQ

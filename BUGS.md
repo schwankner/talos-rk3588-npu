@@ -110,19 +110,24 @@ make -j $(nproc) -C /src M=$(pwd) ARCH=arm64 LLVM=1 LLVM_IAS=1 modules
 
 ---
 
-## Bug 9: rknpu_devfreq.c fails to compile — devfreq-governor.h not installed
+## Bug 9: rknpu_devfreq.c fails to compile / undefined symbols at modpost
 
-**Symptom:** `src/rknpu_devfreq.c:14:10: fatal error: linux/devfreq-governor.h: No such file or directory`
+**Symptom (phase 1):** `src/rknpu_devfreq.c:14:10: fatal error: linux/devfreq-governor.h: No such file or directory`
 
-**Root cause:** `linux/devfreq-governor.h` is only present in the exported kernel headers when `CONFIG_PM_DEVFREQ=y`. The Talos 1.12.x kernel has `CONFIG_PM_DEVFREQ=n`, so the header is absent. The `rknpu-module` Kbuild unconditionally lists `src/rknpu_devfreq.o`, causing the compile to fail.
+**Symptom (phase 2, after removing devfreq.o from Kbuild):** modpost fails: `"rknpu_devfreq_init" [rknpu.ko] undefined!` (and 5 other devfreq symbols).
 
-**Solution:** In the `prepare` step of `rockchip-rknpu/pkg.yaml`, check `.config` and remove the devfreq object from `Kbuild` when devfreq is off:
-```bash
-if ! grep -q "^CONFIG_PM_DEVFREQ=y" /src/.config 2>/dev/null; then
-    sed -i '/rknpu_devfreq\.o/d' Kbuild
-fi
-```
-The module's own header (`src/include/rknpu_devfreq.h`) already wraps all functions in inline no-ops for the `CONFIG_PM_DEVFREQ=n` case, so no functional loss.
+**Root cause:** The Talos 1.12.x `kernel-build` stage has `CONFIG_PM_DEVFREQ=y` in `autoconf.h` BUT does not export `include/linux/devfreq-governor.h` (it is an internal-use header not installed by `modules_prepare`). As a result:
+- `rknpu_devfreq.c` cannot be compiled (header missing).
+- `rknpu_devfreq.h` emits real *declarations* (not inline stubs) because `CONFIG_PM_DEVFREQ` is defined.
+- Removing `rknpu_devfreq.o` from Kbuild while CONFIG is set causes modpost to fail: functions are declared but not provided.
+
+**Solution:** Ship a patched `Kbuild` in `files/Kbuild` that:
+1. Omits `src/rknpu_devfreq.o` from `rknpu-y`.
+2. Adds `-DRKNPU_NO_DEVFREQ` to `ccflags-y`.
+
+`RKNPU_NO_DEVFREQ` is an intentional escape hatch in `rknpu_devfreq.h`: when defined, it forces the header to emit inline no-op stubs regardless of `CONFIG_PM_DEVFREQ`, so all callers link cleanly.
+
+**Why a file in `files/` instead of a `sed` in `prepare`:** bldr caches the `prepare` layer based on source checksums. A `sed` command in `prepare` that modifies files is invisible to the cache — the next run reuses the old cached layer. Shipping `files/Kbuild` changes the build context, which forces proper cache invalidation.
 
 ---
 
