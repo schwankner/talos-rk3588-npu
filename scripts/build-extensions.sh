@@ -33,7 +33,7 @@ require_cmd() {
 }
 
 require_cmd docker
-require_cmd git
+require_cmd curl
 
 # ---------------------------------------------------------------------------
 # Shared buildx builder
@@ -57,12 +57,16 @@ build_rknpu() {
     WORK_DIR="$(mktemp -d)"
     trap 'rm -rf "${WORK_DIR}"' RETURN
 
-    log "Cloning siderolabs/pkgs @ ${PKGS_COMMIT}..."
-    git clone --quiet --depth=1 \
-        "https://github.com/siderolabs/pkgs.git" \
-        "${WORK_DIR}/pkgs"
-    git -C "${WORK_DIR}/pkgs" fetch --quiet --depth=1 origin "${PKGS_COMMIT}"
-    git -C "${WORK_DIR}/pkgs" checkout --quiet "${PKGS_COMMIT}"
+    log "Downloading siderolabs/pkgs @ ${PKGS_COMMIT}..."
+    # GitHub archive API returns a tarball for any commit SHA — avoids the
+    # git fetch limitations with shallow clones and commit SHA refs.
+    curl -fsSL \
+        "https://github.com/siderolabs/pkgs/archive/${PKGS_COMMIT}.tar.gz" \
+        -o "${WORK_DIR}/pkgs.tar.gz"
+    mkdir -p "${WORK_DIR}/pkgs"
+    tar -xzf "${WORK_DIR}/pkgs.tar.gz" \
+        --strip-components=1 \
+        -C "${WORK_DIR}/pkgs"
 
     # Inject LLVM vars that our pkg.yaml needs but pkgs Pkgfile may not have
     if ! grep -q "LLVM_IMAGE" "${WORK_DIR}/pkgs/Pkgfile"; then
