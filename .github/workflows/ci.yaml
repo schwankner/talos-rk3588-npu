@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - "renovate/**"
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  shellcheck:
+    name: Shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run shellcheck
+        run: |
+          shellcheck --severity=warning \
+            scripts/common.sh \
+            scripts/build-extensions.sh \
+            scripts/build-uki.sh \
+            scripts/build-usb-image.sh
+
+  yaml-validate:
+    name: Validate YAML
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate workflow YAMLs
+        run: |
+          python3 - <<'EOF'
+          import yaml, sys, os, glob
+
+          files = glob.glob(".github/workflows/*.yaml")
+          failed = False
+          for f in files:
+              try:
+                  yaml.safe_load(open(f))
+                  print(f"PASS: {f}")
+              except yaml.YAMLError as e:
+                  print(f"FAIL: {f}: {e}")
+                  failed = True
+          sys.exit(1 if failed else 0)
+          EOF
+      - name: Validate pkg.yaml files
+        run: |
+          python3 - <<'EOF'
+          import yaml, sys, glob
+
+          files = glob.glob("**/pkg.yaml", recursive=True)
+          if not files:
+              print("No pkg.yaml files found yet — skipping")
+              sys.exit(0)
+          failed = False
+          for f in files:
+              try:
+                  yaml.safe_load(open(f))
+                  print(f"PASS: {f}")
+              except yaml.YAMLError as e:
+                  print(f"FAIL: {f}: {e}")
+                  failed = True
+          sys.exit(1 if failed else 0)
+          EOF

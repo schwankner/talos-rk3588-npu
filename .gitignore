@@ -1,0 +1,55 @@
+# Build outputs
+dist/
+_build/
+_out/
+
+# Talos images
+*.raw
+*.raw.zst
+*.efi
+*.iso
+
+# Kernel build artifacts
+*.ko
+*.o
+*.mod
+*.mod.c
+*.symvers
+modules.order
+Module.symvers
+
+# Go build artifacts
+plugins/*/rk3588-npu-device-plugin
+plugins/*/*.test
+plugins/*/vendor/
+
+# Local OCI registry cache
+registry/
+
+# Podman / container build cache
+.podman/
+
+# Signing keys (never commit — restore from secrets)
+keys/signing_key.pem
+keys/signing_key.x509
+
+# bldr cache
+.cache/
+_bldr/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Claude Code
+.claude/
+CLAUDE.md
+
+# macOS
+.DS_Store
+.AppleDouble
+
+# Environment / secrets
+.env
+*.secret
