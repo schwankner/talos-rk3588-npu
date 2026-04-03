@@ -1,0 +1,4 @@
+# Rockchip RKNPU device node
+# Create /dev/rknpu with world-read/write so the CDI device plugin can expose
+# it to containers without requiring privileged: true.
+KERNEL=="rknpu", MODE="0666", TAG+="uaccess"

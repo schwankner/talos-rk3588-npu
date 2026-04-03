@@ -1,0 +1,13 @@
+version: v1alpha1
+metadata:
+  name: rockchip-rknpu
+  version: "{{ .VERSION }}"
+  author: talos-rockchip-rk3588-npu contributors
+  description: |
+    [{{ .TIER }}] Rockchip vendor rknpu kernel module for the RK3588 NPU.
+    Provides /dev/rknpu for use with the RKNN runtime (librknnrt.so).
+    Enables NPU access in Kubernetes pods without privileged: true
+    via CDI injection and procMount: Unmasked (requires kernel 6.18+).
+  compatibility:
+    talos:
+      version: ">= v1.12.0"

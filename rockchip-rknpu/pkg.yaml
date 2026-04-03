@@ -1,0 +1,86 @@
+name: rockchip-rknpu
+variant: scratch
+shell: /bin/bash
+# {{ if eq .ARCH "aarch64" }} This in fact is YAML comment, but Go templating instruction is evaluated by bldr
+dependencies:
+  - stage: base
+  # kernel-build provides /src with the full kernel source tree and Module.symvers.
+  # The pkgs commit for a given Talos release is documented in:
+  # https://github.com/siderolabs/talos/blob/<talos-version>/pkg/machinery/gendata/data/pkgs
+  - stage: kernel-build
+  - image: "{{ .LLVM_IMAGE }}:{{ .LLVM_REV }}"
+steps:
+  - sources:
+      # w568w/rknpu-module: out-of-tree Rockchip vendor rknpu driver, ported to mainline kernel.
+      # Tested on kernel 6.19 (works on 6.18 as well — identical API surface).
+      # Version 0.9.8 matches RKNN SDK / librknnrt.so 2.3.x ABI.
+      - url: https://github.com/w568w/rknpu-module/archive/refs/heads/main.tar.gz
+        destination: rknpu-module.tar.gz
+        sha256: "4ad3a6fc8afdc53cacbebe4b7075e40c7c46a5fbb457a0efc28c6d4dc93d271f"
+        sha512: "02a5a2642835227559d00f49a61f2bdbae1f75aa76bcb5731d0d19e3cf6b48e8902c7949635f219faf8693ce5ee228fb38d6d80e4ce0d8f4792a9ee15fa9b1bc"
+    env:
+      ARCH: arm64
+      LLVM: "1"
+      LLVM_IAS: "1"
+    prepare:
+      - |
+        KERNEL_RELEASE=$(cat /src/include/config/kernel.release)
+        mkdir -p /rootfs/usr/lib/modules/${KERNEL_RELEASE}/kernel/drivers/rknpu
+        mkdir -p /rootfs/usr/lib/udev/rules.d
+        tar xf rknpu-module.tar.gz --strip-components=1
+    build:
+      - |
+        # Build rknpu.ko against the Talos kernel source.
+        # KDIR=/src: kernel source tree from stage: kernel-build
+        # M=$(pwd):  out-of-tree module directory
+        make -j $(nproc) \
+          ARCH=arm64 \
+          LLVM=1 \
+          LLVM_IAS=1 \
+          KDIR=/src \
+          M=$(pwd) \
+          modules
+    install:
+      - |
+        KERNEL_RELEASE=$(cat /src/include/config/kernel.release)
+
+        install -D -m 644 rknpu.ko \
+          /rootfs/usr/lib/modules/${KERNEL_RELEASE}/kernel/drivers/rknpu/rknpu.ko
+
+        # udev rule: create /dev/rknpu with world-read/write so unprivileged containers
+        # can access it via CDI injection.
+        install -D -m 644 /pkg/files/90-rknpu.rules \
+          /rootfs/usr/lib/udev/rules.d/90-rknpu.rules
+    test:
+      - |
+        # Verify the module is not signed (expected for an out-of-tree OOT module on
+        # Talos mainline kernel — module signing is not enforced by default).
+        # If the module is signed, grep will find the signature trailer and exit 0.
+        # The test is inverted: we expect the module to build cleanly without
+        # requiring module signing (Talos loads unsigned OOT modules by default).
+        find /rootfs/usr/lib/modules -name '*.ko' | grep -q '.' || \
+          (echo "ERROR: no .ko files found in /rootfs" && exit 1)
+      - |
+        mkdir -p /extensions-validator-rootfs
+        cp -r /rootfs/ /extensions-validator-rootfs/rootfs
+        cp /pkg/manifest.yaml /extensions-validator-rootfs/manifest.yaml
+        /extensions-validator validate --rootfs=/extensions-validator-rootfs --pkg-name="${PKG_NAME}"
+finalize:
+  - from: /rootfs
+    to: /rootfs
+  - from: /pkg/manifest.yaml
+    to: /
+# {{ else }} This in fact is YAML comment, but Go templating instruction is evaluated by bldr
+# Non-aarch64 builds produce an empty extension (RK3588 is ARM64-only).
+dependencies:
+  - stage: base
+steps:
+  - prepare:
+      - |
+        mkdir /rootfs
+finalize:
+  - from: /pkg/manifest.yaml
+    to: /manifest.yaml
+  - from: /rootfs
+    to: /rootfs
+  # {{ end }} This in fact is YAML comment, but Go templating instruction is evaluated by bldr

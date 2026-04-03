@@ -1,0 +1,13 @@
+version: v1alpha1
+metadata:
+  name: rockchip-rknn-libs
+  version: "{{ .VERSION }}"
+  author: talos-rockchip-rk3588-npu contributors
+  description: |
+    [{{ .TIER }}] Rockchip RKNN runtime library (librknnrt.so) for the RK3588 NPU.
+    Provides the closed-source userspace library that applications link against
+    to run inference via the rknpu kernel module.
+    The library is bind-mounted into pods via CDI injection.
+  compatibility:
+    talos:
+      version: ">= v1.12.0"

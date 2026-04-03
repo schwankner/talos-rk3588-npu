@@ -1,0 +1,50 @@
+name: rockchip-rknn-libs
+variant: scratch
+shell: /bin/bash
+# {{ if eq .ARCH "aarch64" }} This in fact is YAML comment, but Go templating instruction is evaluated by bldr
+dependencies:
+  - stage: base
+steps:
+  - sources:
+      # librknnrt.so: Rockchip closed-source RKNN runtime library for RK3588.
+      # Sourced from airockchip/rknn-toolkit2 (Linux/aarch64 build).
+      # Downloaded directly to avoid the 1.5 GB full-repo tarball.
+      - url: https://raw.githubusercontent.com/airockchip/rknn-toolkit2/v{{ .RKNN_RUNTIME_VERSION }}/rknpu2/runtime/Linux/librknn_api/aarch64/librknnrt.so
+        destination: librknnrt.so
+        sha256: "d31fc19c85b85f6091b2bd0f6af9d962d5264a4e410bfb536402ec92bac738e8"
+        sha512: "232791f48e56d87751c4977d156ab7dd48a964ad07eff333625a0dcd556ff2afeb8a62830146d80cf25cdc4f322123a50e7fe2f9a065000c3bee2ac2657c5acc"
+    prepare:
+      - |
+        mkdir -p /rootfs/usr/lib
+    install:
+      - |
+        install -D -m 755 librknnrt.so /rootfs/usr/lib/librknnrt.so
+    test:
+      - |
+        [ -f /rootfs/usr/lib/librknnrt.so ] || (echo "ERROR: librknnrt.so not found" && exit 1)
+        file /rootfs/usr/lib/librknnrt.so | grep -q "ELF 64-bit LSB" || \
+          (echo "ERROR: librknnrt.so is not a 64-bit ELF binary" && exit 1)
+      - |
+        mkdir -p /extensions-validator-rootfs
+        cp -r /rootfs/ /extensions-validator-rootfs/rootfs
+        cp /pkg/manifest.yaml /extensions-validator-rootfs/manifest.yaml
+        /extensions-validator validate --rootfs=/extensions-validator-rootfs --pkg-name="${PKG_NAME}"
+finalize:
+  - from: /rootfs
+    to: /rootfs
+  - from: /pkg/manifest.yaml
+    to: /
+# {{ else }} This in fact is YAML comment, but Go templating instruction is evaluated by bldr
+# Non-aarch64 builds produce an empty extension (RK3588 is ARM64-only).
+dependencies:
+  - stage: base
+steps:
+  - prepare:
+      - |
+        mkdir /rootfs
+finalize:
+  - from: /pkg/manifest.yaml
+    to: /manifest.yaml
+  - from: /rootfs
+    to: /rootfs
+  # {{ end }} This in fact is YAML comment, but Go templating instruction is evaluated by bldr

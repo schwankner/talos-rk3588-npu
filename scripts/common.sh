@@ -20,7 +20,8 @@ LLVM_IMAGE="${LLVM_IMAGE:-ghcr.io/siderolabs/llvm}"
 LLVM_REV="${LLVM_REV:-v1.14.0-alpha.0}"
 
 # Rockchip NPU driver (vendor rknpu, not mainline rocket)
-# Source: https://github.com/airockchip/rknpu2
+# Source: https://github.com/w568w/rknpu-module (out-of-tree port to mainline kernel)
+# Version refers to the RKNN SDK ABI level, not a release tag (there are none).
 RKNPU_VERSION="${RKNPU_VERSION:-0.9.8}"
 
 # Rockchip RKNN runtime library (librknnrt.so)
