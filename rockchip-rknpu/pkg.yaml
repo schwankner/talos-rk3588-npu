@@ -31,14 +31,14 @@ steps:
     build:
       - |
         # Build rknpu.ko against the Talos kernel source.
-        # KDIR=/src: kernel source tree from stage: kernel-build
-        # M=$(pwd):  out-of-tree module directory
-        make -j $(nproc) \
+        # -C /src: invoke the kernel Makefile (which has the 'modules' target)
+        # M=$(pwd): tells the kernel build system where the OOT module lives
+        make -j "$(nproc)" \
+          -C /src \
+          M="$(pwd)" \
           ARCH=arm64 \
           LLVM=1 \
           LLVM_IAS=1 \
-          KDIR=/src \
-          M=$(pwd) \
           modules
     install:
       - |
