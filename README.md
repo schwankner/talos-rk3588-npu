@@ -4,7 +4,7 @@ Talos Linux system extension and Kubernetes device plugin for the Rockchip RK358
 
 Runs the RK3588 NPU in Kubernetes pods **without `privileged: true`** by leveraging Talos Linux's mainline kernel 6.18+ and the Container Device Interface (CDI).
 
-Inspired by and structurally based on [talos-jetson-orin-nx](https://github.com/schwankner/talos-jetson-orin-nx).
+Inspired by [talos-jetson-orin-nx](https://github.com/schwankner/talos-jetson-orin-nx) and [talos-sbc-rk3588](https://github.com/milas/talos-sbc-rk3588).
 
 ## Supported Hardware
 
