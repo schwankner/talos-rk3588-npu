@@ -31,15 +31,14 @@ steps:
         mkdir -p /rootfs/usr/lib/udev/rules.d
         tar xf rknpu-module.tar.gz --strip-components=1
 
-        # devfreq-governor.h is only installed when CONFIG_PM_DEVFREQ=y.
-        # Talos 1.12.x kernel has CONFIG_PM_DEVFREQ=n, so exclude the
-        # devfreq compilation unit from Kbuild.  The header
-        # src/include/rknpu_devfreq.h already provides inline no-op stubs
-        # for all devfreq functions when CONFIG_PM_DEVFREQ is not defined.
-        if ! grep -q "^CONFIG_PM_DEVFREQ=y" /src/.config 2>/dev/null; then
-            echo "CONFIG_PM_DEVFREQ not enabled — removing rknpu_devfreq.o from Kbuild"
-            sed -i '/rknpu_devfreq\.o/d' Kbuild
-        fi
+        # Replace the upstream Kbuild with our patched version that drops
+        # rknpu_devfreq.o.  The Talos 1.12.x kernel has CONFIG_PM_DEVFREQ=n
+        # so linux/devfreq-governor.h is not installed; compiling devfreq.c
+        # fails.  The rknpu_devfreq.h header already provides inline no-op
+        # stubs for all devfreq functions when CONFIG_PM_DEVFREQ is unset.
+        # We ship the patched Kbuild in files/ to ensure bldr cache is
+        # invalidated deterministically (sed on a cached layer is invisible).
+        cp /pkg/files/Kbuild ./Kbuild
     build:
       - |
         # Build rknpu.ko against the Talos kernel source.
