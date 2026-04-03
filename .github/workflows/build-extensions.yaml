@@ -12,8 +12,6 @@ on:
       - "scripts/build-extensions.sh"
   workflow_dispatch:
   workflow_call:
-    secrets:
-      inherit: true
 
 permissions:
   contents: read

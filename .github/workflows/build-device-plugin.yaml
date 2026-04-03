@@ -8,8 +8,6 @@ on:
       - "plugins/rk3588-npu-device-plugin/**"
   workflow_dispatch:
   workflow_call:
-    secrets:
-      inherit: true
 
 permissions:
   contents: read
