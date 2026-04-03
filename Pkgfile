@@ -1,0 +1,16 @@
+# syntax = ghcr.io/siderolabs/bldr:v0.5.6
+#
+# Pkgfile for Talos system extensions that do NOT require a kernel-build stage.
+# rockchip-rknn-libs only downloads a pre-built shared library, so it can be
+# built directly from this file without cloning siderolabs/pkgs.
+#
+# rockchip-rknpu (kernel module) must be built via scripts/build-extensions.sh,
+# which injects rockchip-rknpu/pkg.yaml into a siderolabs/pkgs checkout.
+
+format: v1alpha2
+
+vars:
+  RKNN_RUNTIME_VERSION: "2.3.2"
+
+labels:
+  org.opencontainers.image.source: https://github.com/schwankner/talos-rk3588-npu

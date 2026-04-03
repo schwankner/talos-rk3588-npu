@@ -1,0 +1,103 @@
+---
+# RK3588 NPU Device Plugin DaemonSet
+#
+# Runs on every node that has /dev/rknpu (i.e. nodes with the rockchip-rknpu
+# system extension loaded).  Registers rockchip.com/npu with the kubelet and
+# writes the CDI spec to /var/run/cdi/rockchip-npu.yaml so containerd can
+# inject /dev/rknpu and librknnrt.so into requesting containers.
+#
+# Usage in a pod:
+#   resources:
+#     limits:
+#       rockchip.com/npu: "1"
+#   securityContext:
+#     procMount: Unmasked   # container-level — unmasks /proc/device-tree
+#   # Pod-level:
+#   # spec:
+#   #   hostUsers: false
+#   #   securityContext:
+#   #     procMount: Unmasked  ← wrong; procMount is container-level only
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: rk3588-npu-device-plugin
+  namespace: kube-system
+  labels:
+    app: rk3588-npu-device-plugin
+spec:
+  selector:
+    matchLabels:
+      app: rk3588-npu-device-plugin
+  template:
+    metadata:
+      labels:
+        app: rk3588-npu-device-plugin
+    spec:
+      priorityClassName: system-node-critical
+      tolerations:
+        - operator: Exists
+          effect: NoSchedule
+
+      # Only schedule on nodes that actually have the NPU device.
+      # Talos nodes with the rockchip-rknpu extension loaded will expose /dev/rknpu;
+      # add a node label "rockchip.com/npu=true" via Talos machine config or manually.
+      nodeSelector:
+        kubernetes.io/arch: arm64
+
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: rockchip.com/npu
+                    operator: In
+                    values: ["true"]
+
+      containers:
+        - name: rk3588-npu-device-plugin
+          image: ghcr.io/schwankner/rk3588-npu-device-plugin:latest
+          imagePullPolicy: Always
+
+          securityContext:
+            # Needs access to kubelet socket and /dev/rknpu — no broad privileges.
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+
+          volumeMounts:
+            - name: device-plugin
+              mountPath: /var/lib/kubelet/device-plugins
+            - name: dev
+              mountPath: /dev
+            - name: cdi
+              mountPath: /var/run/cdi
+            - name: lib
+              mountPath: /usr/lib
+              readOnly: true
+
+      volumes:
+        - name: device-plugin
+          hostPath:
+            path: /var/lib/kubelet/device-plugins
+            type: Directory
+        - name: dev
+          hostPath:
+            path: /dev
+            type: Directory
+        - name: cdi
+          hostPath:
+            path: /var/run/cdi
+            type: DirectoryOrCreate
+        - name: lib
+          hostPath:
+            path: /usr/lib
+            type: Directory

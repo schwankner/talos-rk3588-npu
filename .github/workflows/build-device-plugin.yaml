@@ -1,0 +1,66 @@
+name: Build Device Plugin
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "plugins/rk3588-npu-device-plugin/**"
+  workflow_dispatch:
+  workflow_call:
+    secrets:
+      inherit: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: Build device plugin container
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker-container
+
+      - name: Determine image tag
+        id: tag
+        run: |
+          # On a version tag push the tag is e.g. "v1.12.6-rknpu0.9.8";
+          # on main pushes use git short SHA.
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            echo "TAG=${GITHUB_REF#refs/tags/}" >> "${GITHUB_OUTPUT}"
+          else
+            echo "TAG=$(git rev-parse --short HEAD)" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: plugins/rk3588-npu-device-plugin
+          file: plugins/rk3588-npu-device-plugin/Dockerfile
+          platforms: linux/arm64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/rk3588-npu-device-plugin:${{ steps.tag.outputs.TAG }}
+            ghcr.io/${{ github.repository_owner }}/rk3588-npu-device-plugin:latest
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/build-cache/rk3588-npu-device-plugin
+          cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/build-cache/rk3588-npu-device-plugin,mode=max
+
+      - name: Summary
+        run: |
+          echo "### Device Plugin Image" >> "${GITHUB_STEP_SUMMARY}"
+          echo "" >> "${GITHUB_STEP_SUMMARY}"
+          echo "\`ghcr.io/${{ github.repository_owner }}/rk3588-npu-device-plugin:${{ steps.tag.outputs.TAG }}\`" >> "${GITHUB_STEP_SUMMARY}"

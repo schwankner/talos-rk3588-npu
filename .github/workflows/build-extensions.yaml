@@ -1,0 +1,86 @@
+name: Build Extensions
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "rockchip-rknpu/**"
+      - "rockchip-rknn-libs/**"
+      - "Pkgfile"
+      - "scripts/common.sh"
+      - "scripts/build-extensions.sh"
+  workflow_dispatch:
+  workflow_call:
+    secrets:
+      inherit: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: Build system extensions
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version pins
+        id: versions
+        run: |
+          source scripts/common.sh
+          echo "TALOS_VERSION=${TALOS_VERSION}"         >> "${GITHUB_OUTPUT}"
+          echo "KERNEL_VERSION=${KERNEL_VERSION}"       >> "${GITHUB_OUTPUT}"
+          echo "PKGS_COMMIT=${PKGS_COMMIT}"             >> "${GITHUB_OUTPUT}"
+          echo "RKNPU_VERSION=${RKNPU_VERSION}"         >> "${GITHUB_OUTPUT}"
+          echo "RKNN_RUNTIME_VERSION=${RKNN_RUNTIME_VERSION}" >> "${GITHUB_OUTPUT}"
+
+      - name: Check if images already exist
+        id: cache
+        run: |
+          source scripts/common.sh
+          OWNER="${{ github.repository_owner }}"
+          RKNPU_IMAGE="ghcr.io/${OWNER}/rockchip-rknpu:${RKNPU_VERSION}-${KERNEL_VERSION}"
+          RKNN_IMAGE="ghcr.io/${OWNER}/rockchip-rknn-libs:${RKNN_RUNTIME_VERSION}-${KERNEL_VERSION}"
+          SKIP=true
+          docker manifest inspect "${RKNPU_IMAGE}" >/dev/null 2>&1 || SKIP=false
+          docker manifest inspect "${RKNN_IMAGE}"  >/dev/null 2>&1 || SKIP=false
+          echo "skip=${SKIP}" >> "${GITHUB_OUTPUT}"
+
+      - name: Log in to GHCR
+        if: steps.cache.outputs.skip != 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        if: steps.cache.outputs.skip != 'true'
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker-container
+
+      - name: Build extensions
+        if: steps.cache.outputs.skip != 'true'
+        env:
+          REGISTRY: "ghcr.io/${{ github.repository_owner }}"
+          CACHE_REGISTRY: "ghcr.io/${{ github.repository_owner }}/build-cache"
+        run: |
+          source scripts/common.sh
+          REGISTRY="${REGISTRY}" \
+          CACHE_REGISTRY="${CACHE_REGISTRY}" \
+          bash scripts/build-extensions.sh all
+
+      - name: Summary
+        run: |
+          source scripts/common.sh
+          OWNER="${{ github.repository_owner }}"
+          echo "### Extension Images" >> "${GITHUB_STEP_SUMMARY}"
+          echo "" >> "${GITHUB_STEP_SUMMARY}"
+          echo "| Extension | Image |" >> "${GITHUB_STEP_SUMMARY}"
+          echo "|-----------|-------|" >> "${GITHUB_STEP_SUMMARY}"
+          echo "| rockchip-rknpu | \`ghcr.io/${OWNER}/rockchip-rknpu:${RKNPU_VERSION}-${KERNEL_VERSION}\` |" >> "${GITHUB_STEP_SUMMARY}"
+          echo "| rockchip-rknn-libs | \`ghcr.io/${OWNER}/rockchip-rknn-libs:${RKNN_RUNTIME_VERSION}-${KERNEL_VERSION}\` |" >> "${GITHUB_STEP_SUMMARY}"

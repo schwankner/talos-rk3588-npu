@@ -23,6 +23,20 @@ jobs:
             scripts/build-uki.sh \
             scripts/build-usb-image.sh
 
+  go-vet:
+    name: Go vet (device plugin)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: plugins/rk3588-npu-device-plugin/go.mod
+          cache-dependency-path: plugins/rk3588-npu-device-plugin/go.sum
+      - name: go vet
+        run: |
+          cd plugins/rk3588-npu-device-plugin
+          go vet ./...
+
   yaml-validate:
     name: Validate YAML
     runs-on: ubuntu-latest

@@ -1,0 +1,101 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v1.12.6-rknpu0.9.8)"
+        required: true
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  build-extensions:
+    name: Build system extensions
+    uses: ./.github/workflows/build-extensions.yaml
+    secrets: inherit
+
+  build-plugin:
+    name: Build device plugin
+    uses: ./.github/workflows/build-device-plugin.yaml
+    secrets: inherit
+
+  release:
+    name: Create GitHub Release
+    needs: [build-extensions, build-plugin]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version pins
+        id: versions
+        run: |
+          source scripts/common.sh
+          echo "TALOS_VERSION=${TALOS_VERSION}"               >> "${GITHUB_OUTPUT}"
+          echo "KERNEL_VERSION=${KERNEL_VERSION}"             >> "${GITHUB_OUTPUT}"
+          echo "RKNPU_VERSION=${RKNPU_VERSION}"               >> "${GITHUB_OUTPUT}"
+          echo "RKNN_RUNTIME_VERSION=${RKNN_RUNTIME_VERSION}" >> "${GITHUB_OUTPUT}"
+
+      - name: Determine release tag
+        id: ref
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            echo "TAG=${GITHUB_REF#refs/tags/}" >> "${GITHUB_OUTPUT}"
+          else
+            echo "TAG=${{ github.event.inputs.tag }}" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Create release body
+        id: body
+        run: |
+          OWNER="${{ github.repository_owner }}"
+          TAG="${{ steps.ref.outputs.TAG }}"
+          cat > /tmp/release-body.md <<EOF
+          ## Talos RK3588 NPU — ${TAG}
+
+          | Component | Version |
+          |-----------|---------|
+          | Talos | ${{ steps.versions.outputs.TALOS_VERSION }} |
+          | Kernel | ${{ steps.versions.outputs.KERNEL_VERSION }} |
+          | rknpu driver | ${{ steps.versions.outputs.RKNPU_VERSION }} |
+          | librknnrt | ${{ steps.versions.outputs.RKNN_RUNTIME_VERSION }} |
+
+          ## Extension Images
+
+          Add to your Talos machine config \`machine.install.extensions\`:
+
+          \`\`\`yaml
+          machine:
+            install:
+              extensions:
+                - image: ghcr.io/${OWNER}/rockchip-rknpu:${{ steps.versions.outputs.RKNPU_VERSION }}-${{ steps.versions.outputs.KERNEL_VERSION }}
+                - image: ghcr.io/${OWNER}/rockchip-rknn-libs:${{ steps.versions.outputs.RKNN_RUNTIME_VERSION }}-${{ steps.versions.outputs.KERNEL_VERSION }}
+          \`\`\`
+
+          ## Device Plugin
+
+          \`\`\`yaml
+          image: ghcr.io/${OWNER}/rk3588-npu-device-plugin:${TAG}
+          \`\`\`
+
+          ## Requirements
+
+          - Talos ${{ steps.versions.outputs.TALOS_VERSION }} with sbc-rockchip overlay (factory.talos.dev schematic)
+          - \`user.max_user_namespaces: "15000"\` sysctl (for procMount:Unmasked)
+          - Pods must set \`spec.hostUsers: false\` and \`containers[].securityContext.procMount: Unmasked\`
+          EOF
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ref.outputs.TAG }}
+          name: "${{ steps.ref.outputs.TAG }}"
+          body_path: /tmp/release-body.md
+          draft: false
+          prerelease: false

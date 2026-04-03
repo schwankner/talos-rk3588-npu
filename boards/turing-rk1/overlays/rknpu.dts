@@ -1,0 +1,112 @@
+// SPDX-License-Identifier: GPL-2.0-only
+//
+// DTB overlay: replace the mainline rocket (rknn_core_*) DT nodes with a
+// single vendor-compatible rknpu node so the w568w/rknpu-module driver binds.
+//
+// Background
+// ----------
+// The Talos / sbc-rockchip kernel 6.18 ships the mainline rocket driver
+// (drivers/accel/rocket).  Its DT nodes use:
+//   compatible = "rockchip,rk3588-rknn-core"  (per-core, fdab/fdac/fdad0000)
+//
+// The vendor rknpu driver (w568w/rknpu-module) matches:
+//   compatible = "rockchip,rk3588-rknpu"       (single unified node)
+//
+// This overlay:
+//   1. Disables the per-core rknn_core_* and rknn_mmu_* nodes.
+//   2. Inserts a single rknpu node at fdab0000 covering all three cores.
+//
+// Integration (Talos machine config):
+//   machine:
+//     kernel:
+//       modules:
+//         - name: rknpu
+//       # Overlay applied via installer image or initramfs DT overlay hook.
+//       # Use factory.talos.dev schematic + the compiled rknpu.dtbo in the
+//       # board's overlay directory.
+//
+// WARNING: Load either rocket OR rknpu — never both at the same time.
+//          If the rocket driver is built as a module and autoloaded, blacklist
+//          it in the Talos machine config:
+//            machine:
+//              kernel:
+//                modules:
+//                  - name: rknpu
+//              # (do not list rocket — it will not bind without rknn_core nodes)
+
+/dts-v1/;
+/plugin/;
+
+#include <dt-bindings/interrupt-controller/arm-gic.h>
+#include <dt-bindings/power/rk3588-power.h>
+
+/ {
+	compatible = "rockchip,rk3588";
+};
+
+/* -----------------------------------------------------------------------
+ * 1. Disable mainline rocket driver nodes
+ * ----------------------------------------------------------------------- */
+&rknn_core_0 { status = "disabled"; };
+&rknn_core_1 { status = "disabled"; };
+&rknn_core_2 { status = "disabled"; };
+&rknn_mmu_0  { status = "disabled"; };
+&rknn_mmu_1  { status = "disabled"; };
+&rknn_mmu_2  { status = "disabled"; };
+
+/* -----------------------------------------------------------------------
+ * 2. Vendor rknpu node — single unified device, three register ranges
+ *
+ * Register map (from Rockchip BSP rk3588s.dtsi):
+ *   Core 0: 0xfdab0000  size 0x9000
+ *   Core 1: 0xfdac0000  size 0x9000
+ *   Core 2: 0xfdad0000  size 0x9000
+ *
+ * Interrupts: SPI 110/111/112 (level high) — one per core
+ * Clocks:     SCMI_CLK_NPU via SCMI interface
+ * Power:      PD_NPUTOP + PD_NPU1 + PD_NPU2
+ * IOMMUs:     Three IOMMUs shared with rknn_mmu_0/1/2 (same hardware,
+ *             reused here under the vendor node via iommus phandle).
+ *
+ * NOTE: The iommus / clocks / resets phandles reference nodes that remain
+ * in the base DTB.  Only the rknn_core_* binding nodes are replaced here.
+ * ----------------------------------------------------------------------- */
+&{/} {
+	rknpu: npu@fdab0000 {
+		compatible = "rockchip,rk3588-rknpu", "rockchip,rknpu";
+		reg = <0x0 0xfdab0000 0x0 0x9000>,
+		      <0x0 0xfdac0000 0x0 0x9000>,
+		      <0x0 0xfdad0000 0x0 0x9000>;
+		reg-names = "rknpu_core0", "rknpu_core1", "rknpu_core2";
+
+		interrupts = <GIC_SPI 110 IRQ_TYPE_LEVEL_HIGH 0>,
+		             <GIC_SPI 111 IRQ_TYPE_LEVEL_HIGH 0>,
+		             <GIC_SPI 112 IRQ_TYPE_LEVEL_HIGH 0>;
+		interrupt-names = "npu_irq0", "npu_irq1", "npu_irq2";
+
+		clocks = <&scmi_clk SCMI_CLK_NPU>;
+		clock-names = "clk_npu";
+
+		resets = <&cru SRST_A_RKNN_NODDR>;
+		reset-names = "srst_a";
+
+		power-domains = <&power RK3588_PD_NPUTOP>,
+		                <&power RK3588_PD_NPU1>,
+		                <&power RK3588_PD_NPU2>;
+		power-domain-names = "nputop", "npu1", "npu2";
+
+		/* Re-use the same IOMMU hardware units (they remain in base DTB
+		 * as rknn_mmu_0/1/2; the phandle still resolves even though
+		 * the rknn_mmu nodes are disabled — the IOMMU driver binds to
+		 * the physical register range regardless of DT status). */
+		iommus = <&rknn_mmu_0>, <&rknn_mmu_1>, <&rknn_mmu_2>;
+
+		operating-points-v2 = <&npu_opp_table>;
+
+		/* Board-specific supply — set in board DTS, referenced here */
+		npu-supply = <&vdd_npu_s0>;
+		sram-supply = <&vdd_npu_s0>;
+
+		status = "okay";
+	};
+};

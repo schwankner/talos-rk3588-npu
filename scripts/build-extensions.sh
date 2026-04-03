@@ -1,16 +1,140 @@
 #!/usr/bin/env bash
-# Build the RK3588 NPU Talos system extensions (rknpu + rknn-libs).
-# Produces OCI images pushed to ${REGISTRY}.
+# Build RK3588 NPU Talos system extensions and push to REGISTRY.
+#
+# rockchip-rknpu  — rknpu.ko OOT kernel module (needs siderolabs/pkgs tree)
+# rockchip-rknn-libs — librknnrt.so runtime library (standalone bldr build)
+#
+# Usage:
+#   REGISTRY=ghcr.io/mrmoor ./scripts/build-extensions.sh
+#   REGISTRY=ghcr.io/mrmoor BUILD_ARG_TAG=6.18.18-talos ./scripts/build-extensions.sh
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=scripts/common.sh
 source "${SCRIPT_DIR}/common.sh"
 
-echo "Building rockchip-rknpu extension (rknpu ${RKNPU_VERSION}, kernel ${KERNEL_VERSION})"
-# TODO: implement bldr build for rockchip-rknpu/pkg.yaml
+REPO_ROOT="$(dirname "${SCRIPT_DIR}")"
+REGISTRY="${REGISTRY:-ghcr.io/mrmoor}"
+BUILD_ARG_TAG="${BUILD_ARG_TAG:-${KERNEL_VERSION}}"
+CACHE_REGISTRY="${CACHE_REGISTRY:-${REGISTRY}/build-cache}"
 
-echo "Building rockchip-rknn-libs extension (librknnrt ${RKNN_RUNTIME_VERSION})"
-# TODO: implement bldr build for rockchip-rknn-libs/pkg.yaml
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
-echo "Done. Images pushed to ${REGISTRY}"
+log() { echo "[build-extensions] $*"; }
+
+require_cmd() {
+    if ! command -v "$1" >/dev/null 2>&1; then
+        echo "ERROR: $1 is not installed or not in PATH" >&2
+        exit 1
+    fi
+}
+
+require_cmd docker
+require_cmd git
+
+# ---------------------------------------------------------------------------
+# Shared buildx builder
+# ---------------------------------------------------------------------------
+
+BUILDER_NAME="talos-rk3588-builder"
+if ! docker buildx inspect "${BUILDER_NAME}" >/dev/null 2>&1; then
+    log "Creating buildx builder ${BUILDER_NAME}..."
+    docker buildx create --name "${BUILDER_NAME}" --driver docker-container --use
+else
+    docker buildx use "${BUILDER_NAME}"
+fi
+
+# ---------------------------------------------------------------------------
+# rockchip-rknpu — kernel module, requires siderolabs/pkgs tree
+# ---------------------------------------------------------------------------
+
+build_rknpu() {
+    log "Building rockchip-rknpu (driver ${RKNPU_VERSION}, kernel ${KERNEL_VERSION})..."
+
+    WORK_DIR="$(mktemp -d)"
+    trap 'rm -rf "${WORK_DIR}"' RETURN
+
+    log "Cloning siderolabs/pkgs @ ${PKGS_COMMIT}..."
+    git clone --quiet --depth=1 \
+        "https://github.com/siderolabs/pkgs.git" \
+        "${WORK_DIR}/pkgs"
+    git -C "${WORK_DIR}/pkgs" fetch --quiet --depth=1 origin "${PKGS_COMMIT}"
+    git -C "${WORK_DIR}/pkgs" checkout --quiet "${PKGS_COMMIT}"
+
+    # Inject LLVM vars that our pkg.yaml needs but pkgs Pkgfile may not have
+    if ! grep -q "LLVM_IMAGE" "${WORK_DIR}/pkgs/Pkgfile"; then
+        sed -i "s|^  PKGS:.*|&\n  LLVM_IMAGE: ${LLVM_IMAGE}\n  LLVM_REV: ${LLVM_REV}|" \
+            "${WORK_DIR}/pkgs/Pkgfile"
+    fi
+
+    # Copy our extension into the pkgs tree so bldr can resolve stage: kernel-build
+    cp -r "${REPO_ROOT}/rockchip-rknpu" "${WORK_DIR}/pkgs/rockchip-rknpu"
+
+    local tag="${RKNPU_VERSION}-${KERNEL_VERSION}"
+    local image="${REGISTRY}/rockchip-rknpu:${tag}"
+
+    docker buildx build \
+        --builder "${BUILDER_NAME}" \
+        --file "${WORK_DIR}/pkgs/Pkgfile" \
+        --target rockchip-rknpu \
+        --platform linux/arm64 \
+        --build-arg TAG="${BUILD_ARG_TAG}" \
+        --build-arg PKGS="${PKGS_COMMIT}" \
+        --cache-from "type=registry,ref=${CACHE_REGISTRY}/rockchip-rknpu" \
+        --cache-to   "type=registry,ref=${CACHE_REGISTRY}/rockchip-rknpu,mode=max" \
+        --tag "${image}" \
+        --push \
+        "${WORK_DIR}/pkgs"
+
+    log "Pushed: ${image}"
+}
+
+# ---------------------------------------------------------------------------
+# rockchip-rknn-libs — librknnrt.so, standalone bldr build
+# ---------------------------------------------------------------------------
+
+build_rknn_libs() {
+    log "Building rockchip-rknn-libs (librknnrt ${RKNN_RUNTIME_VERSION}, kernel ${KERNEL_VERSION})..."
+
+    local tag="${RKNN_RUNTIME_VERSION}-${KERNEL_VERSION}"
+    local image="${REGISTRY}/rockchip-rknn-libs:${tag}"
+
+    docker buildx build \
+        --builder "${BUILDER_NAME}" \
+        --file "${REPO_ROOT}/Pkgfile" \
+        --target rockchip-rknn-libs \
+        --platform linux/arm64 \
+        --build-arg TAG="${BUILD_ARG_TAG}" \
+        --build-arg RKNN_RUNTIME_VERSION="${RKNN_RUNTIME_VERSION}" \
+        --cache-from "type=registry,ref=${CACHE_REGISTRY}/rockchip-rknn-libs" \
+        --cache-to   "type=registry,ref=${CACHE_REGISTRY}/rockchip-rknn-libs,mode=max" \
+        --tag "${image}" \
+        --push \
+        "${REPO_ROOT}"
+
+    log "Pushed: ${image}"
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+TARGET="${1:-all}"
+
+case "${TARGET}" in
+    rknpu)      build_rknpu ;;
+    rknn-libs)  build_rknn_libs ;;
+    all)
+        build_rknpu
+        build_rknn_libs
+        ;;
+    *)
+        echo "Usage: $0 [rknpu|rknn-libs|all]" >&2
+        exit 1
+        ;;
+esac
+
+log "Done. Images pushed to ${REGISTRY}"

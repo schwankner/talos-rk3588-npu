@@ -1,0 +1,45 @@
+name: Auto Tag
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "scripts/common.sh"
+      - "rockchip-rknpu/pkg.yaml"
+      - "rockchip-rknn-libs/pkg.yaml"
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    name: Create version tag
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute tag
+        id: tag
+        run: |
+          source scripts/common.sh
+          # Format: v<TALOS_VERSION>-rknpu<RKNPU_VERSION>
+          # e.g.   v1.12.6-rknpu0.9.8
+          TAG="v${TALOS_VERSION}-rknpu${RKNPU_VERSION}"
+          echo "TAG=${TAG}" >> "${GITHUB_OUTPUT}"
+
+      - name: Create tag if not exists
+        run: |
+          TAG="${{ steps.tag.outputs.TAG }}"
+          if git rev-parse "${TAG}" >/dev/null 2>&1; then
+            echo "Tag ${TAG} already exists — skipping"
+          else
+            git config user.name  "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git tag -a "${TAG}" -m "Release ${TAG}"
+            git push origin "${TAG}"
+            echo "Created and pushed tag ${TAG}"
+          fi
