@@ -15,10 +15,6 @@ KERNEL_VERSION="${KERNEL_VERSION:-6.18.18-talos}"
 # Source: https://github.com/siderolabs/talos/blob/v1.12.6/pkg/machinery/gendata/data/pkgs
 PKGS_COMMIT="${PKGS_COMMIT:-a92bed5}"
 
-# LLVM toolchain (used for out-of-tree module builds)
-LLVM_IMAGE="${LLVM_IMAGE:-ghcr.io/siderolabs/llvm}"
-LLVM_REV="${LLVM_REV:-v1.14.0-alpha.0}"
-
 # Rockchip NPU driver (vendor rknpu, not mainline rocket)
 # Source: https://github.com/w568w/rknpu-module (out-of-tree port to mainline kernel)
 # Version refers to the RKNN SDK ABI level, not a release tag (there are none).
