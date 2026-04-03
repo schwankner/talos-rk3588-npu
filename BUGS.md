@@ -90,4 +90,52 @@ machine:
 
 ---
 
+## Bug 6: procMount: Unmasked rejected — "no space left on device" in pod creation
+
+**Symptom:** Pod fails to start with event `no space left on device` when `hostUsers: false` is set. Or: `procMount: Unmasked` is rejected if `hostUsers: false` is missing.
+
+**Root cause (part 1):** Kubernetes enforces that `procMount: Unmasked` requires `hostUsers: false`. Without it, the API server rejects the pod spec.
+
+**Root cause (part 2):** `hostUsers: false` requires user namespaces on the node. User namespaces are controlled by the kernel sysctl `user.max_user_namespaces`. On a freshly installed Talos node the default is `0` (disabled), which causes the "no space left on device" error when the kubelet tries to create the user namespace for the pod.
+
+**Solution:**
+```yaml
+# patches/all.patch9.yaml — apply to all nodes, no reboot required
+machine:
+  sysctls:
+    user.max_user_namespaces: "15000"
+```
+Apply with: `talosctl patch mc --patch @patches/all.patch9.yaml -n <ip>`
+
+The pod spec must use both fields together:
+```yaml
+spec:
+  hostUsers: false
+  containers:
+    - securityContext:
+        procMount: Unmasked
+```
+
+**Note:** `procMount` is a **container-level** field (`containers[].securityContext`), not pod-level. Placing it under `spec.securityContext` causes a validation error.
+
+---
+
+## Bug 7: sbc-rockchip rknn.patch adds wrong compatible string for vendor rknpu driver
+
+**Symptom:** After upgrading to sbc-rockchip v0.2.0 (Talos v1.12.6), dmesg shows NPU power domains active (`fdab0000.npu: Adding to iommu group 7/8/9`) but the vendor rknpu driver does not bind, and `/dev/rknpu` is never created.
+
+**Root cause:** The sbc-rockchip rknn.patch (merged in v0.1.8) adds DT nodes with `compatible = "rockchip,rk3588-rknn-core"` — this is for the **mainline rocket driver** (`drivers/accel/rocket`), not the vendor rknpu driver. The vendor driver (`w568w/rknpu-module`) matches `compatible = "rockchip,rk3588-rknpu"`, which is absent from the sbc-rockchip DTB.
+
+**Two drivers, two compatible strings:**
+| Driver | compatible | device | LLM |
+|--------|-----------|--------|-----|
+| rocket (mainline) | `rockchip,rk3588-rknn-core` | `/dev/accel/accel0` | No |
+| rknpu (vendor) | `rockchip,rk3588-rknpu` | `/dev/rknpu` | Yes (RKLLM) |
+
+**Solution:** A DTB overlay that adds the rknpu-compatible node must be applied at boot. The overlay targets the same hardware addresses (fdab0000/fdac0000/fdad0000) but with the `rockchip,rk3588-rknpu` compatible. This overlay is provided by the `rockchip-rknpu` Talos extension and loaded via Talos `machine.kernel.modules` or an initramfs DT overlay hook.
+
+**Status:** DTB overlay implementation pending — see `boards/` directory.
+
+---
+
 *Add new bugs above this line, most recent first.*
