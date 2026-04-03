@@ -110,6 +110,22 @@ make -j $(nproc) -C /src M=$(pwd) ARCH=arm64 LLVM=1 LLVM_IAS=1 modules
 
 ---
 
+## Bug 9: rknpu_devfreq.c fails to compile — devfreq-governor.h not installed
+
+**Symptom:** `src/rknpu_devfreq.c:14:10: fatal error: linux/devfreq-governor.h: No such file or directory`
+
+**Root cause:** `linux/devfreq-governor.h` is only present in the exported kernel headers when `CONFIG_PM_DEVFREQ=y`. The Talos 1.12.x kernel has `CONFIG_PM_DEVFREQ=n`, so the header is absent. The `rknpu-module` Kbuild unconditionally lists `src/rknpu_devfreq.o`, causing the compile to fail.
+
+**Solution:** In the `prepare` step of `rockchip-rknpu/pkg.yaml`, check `.config` and remove the devfreq object from `Kbuild` when devfreq is off:
+```bash
+if ! grep -q "^CONFIG_PM_DEVFREQ=y" /src/.config 2>/dev/null; then
+    sed -i '/rknpu_devfreq\.o/d' Kbuild
+fi
+```
+The module's own header (`src/include/rknpu_devfreq.h`) already wraps all functions in inline no-ops for the `CONFIG_PM_DEVFREQ=n` case, so no functional loss.
+
+---
+
 ## Bug 6: procMount: Unmasked rejected — "no space left on device" in pod creation
 
 **Symptom:** Pod fails to start with event `no space left on device` when `hostUsers: false` is set. Or: `procMount: Unmasked` is rejected if `hostUsers: false` is missing.

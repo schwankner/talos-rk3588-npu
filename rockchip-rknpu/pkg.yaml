@@ -30,6 +30,16 @@ steps:
         mkdir -p /rootfs/usr/lib/modules/${KERNEL_RELEASE}/kernel/drivers/rknpu
         mkdir -p /rootfs/usr/lib/udev/rules.d
         tar xf rknpu-module.tar.gz --strip-components=1
+
+        # devfreq-governor.h is only installed when CONFIG_PM_DEVFREQ=y.
+        # Talos 1.12.x kernel has CONFIG_PM_DEVFREQ=n, so exclude the
+        # devfreq compilation unit from Kbuild.  The header
+        # src/include/rknpu_devfreq.h already provides inline no-op stubs
+        # for all devfreq functions when CONFIG_PM_DEVFREQ is not defined.
+        if ! grep -q "^CONFIG_PM_DEVFREQ=y" /src/.config 2>/dev/null; then
+            echo "CONFIG_PM_DEVFREQ not enabled — removing rknpu_devfreq.o from Kbuild"
+            sed -i '/rknpu_devfreq\.o/d' Kbuild
+        fi
     build:
       - |
         # Build rknpu.ko against the Talos kernel source.
