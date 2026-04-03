@@ -12,7 +12,6 @@ _out/
 # Kernel build artifacts
 *.ko
 *.o
-*.mod
 *.mod.c
 *.symvers
 modules.order
