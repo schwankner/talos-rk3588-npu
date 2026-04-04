@@ -11,7 +11,16 @@ on:
       - "scripts/common.sh"
       - "scripts/build-extensions.sh"
   workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: "Force rebuild even if images already exist in GHCR"
+        type: boolean
+        default: false
   workflow_call:
+    inputs:
+      force_rebuild:
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -42,6 +51,12 @@ jobs:
           OWNER="${{ github.repository_owner }}"
           RKNPU_IMAGE="ghcr.io/${OWNER}/rockchip-rknpu:${RKNPU_VERSION}-${KERNEL_VERSION}"
           RKNN_IMAGE="ghcr.io/${OWNER}/rockchip-rknn-libs:${RKNN_RUNTIME_VERSION}-${KERNEL_VERSION}"
+          # Allow force-rebuild via workflow_dispatch input or workflow_call input
+          FORCE="${{ inputs.force_rebuild }}"
+          if [[ "${FORCE}" == "true" ]]; then
+            echo "skip=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
           SKIP=true
           docker manifest inspect "${RKNPU_IMAGE}" >/dev/null 2>&1 || SKIP=false
           docker manifest inspect "${RKNN_IMAGE}"  >/dev/null 2>&1 || SKIP=false
