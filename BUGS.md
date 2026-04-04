@@ -179,4 +179,30 @@ spec:
 
 ---
 
+## Bug 10: rknpu.ko fails to load — "key was rejected by service" (module.sig_enforce=1)
+
+**Symptom:** After installing the rockchip-rknpu extension and adding `machine.kernel.modules: [{name: rknpu}]`, the module never loads. `dmesg` shows:
+```
+[talos] controller failed {"controller": "runtime.KernelModuleSpecController",
+  "error": "error loading module \"rknpu\": load rknpu failed: key was rejected by service"}
+```
+`/dev/rknpu` never appears.
+
+**Root cause:** Talos enforces `module.sig_enforce=1` on the kernel command line. Every `.ko` must be signed with the *same* private key used to build the running kernel. The OOT module build (`make -C /src M=$(pwd) modules`) compiles `rknpu.ko` but does **not** automatically sign it — `CONFIG_MODULE_SIG_ALL` is `n` in the Talos kernel config, so the kernel Makefile only signs built-in modules, not OOT ones.
+
+**Fix:** Explicitly call `sign-file` in the `install:` step of `rockchip-rknpu/pkg.yaml`, using the key and certificate that the `kernel-build` stage keeps alongside the kernel source:
+
+```bash
+/src/scripts/sign-file sha256 \
+  /src/certs/signing_key.pem \
+  /src/certs/signing_key.x509 \
+  rknpu.ko
+```
+
+This signs `rknpu.ko` with the exact key embedded in the running Talos kernel (since both the kernel and the OOT module are built from the same `PKGS_COMMIT`), so the kernel's built-in keyring accepts it.
+
+**Verified:** Signing step added in pkg.yaml install phase; rebuild + re-deploy required.
+
+---
+
 *Add new bugs above this line, most recent first.*

@@ -54,6 +54,15 @@ steps:
       - |
         KERNEL_RELEASE=$(cat /src/include/config/kernel.release)
 
+        # Talos enforces module.sig_enforce=1: every .ko must be signed with
+        # the key used to build the kernel.  The kernel-build stage keeps the
+        # signing key at /src/certs/signing_key.pem and the matching X.509
+        # certificate at /src/certs/signing_key.x509.  Sign before install.
+        /src/scripts/sign-file sha256 \
+          /src/certs/signing_key.pem \
+          /src/certs/signing_key.x509 \
+          rknpu.ko
+
         install -D -m 644 rknpu.ko \
           /rootfs/usr/lib/modules/${KERNEL_RELEASE}/kernel/drivers/rknpu/rknpu.ko
 
