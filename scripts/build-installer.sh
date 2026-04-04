@@ -279,10 +279,14 @@ log "Combining: replacing vmlinuz.efi in overlay installer with extension-bearin
 COMBINED_CTX="${PKGS_WORK_DIR}/combined-ctx"
 mkdir -p "${COMBINED_CTX}"
 
-# Extract the extension-bearing vmlinuz.efi by creating a temporary container
+# Extract the extension-bearing vmlinuz.efi by creating a temporary container.
+# chmod 644: docker cp preserves the in-container file ownership (root:root,
+# mode 0400 in Talos installer images), which would cause the subsequent
+# docker cp into the patch container to fail with "permission denied".
 EXTRACT_CID=$("${CONTAINER_RUNTIME}" create "${UKI_EXT_REF}")
 "${CONTAINER_RUNTIME}" cp "${EXTRACT_CID}:/usr/install/arm64/vmlinuz.efi" "${COMBINED_CTX}/vmlinuz.efi"
 "${CONTAINER_RUNTIME}" rm "${EXTRACT_CID}"
+chmod 644 "${COMBINED_CTX}/vmlinuz.efi"
 log "Extracted vmlinuz.efi ($(du -sh "${COMBINED_CTX}/vmlinuz.efi" | cut -f1)) from ${UKI_EXT_REF}"
 
 cat > "${COMBINED_CTX}/Dockerfile" <<DOCKERFILE
