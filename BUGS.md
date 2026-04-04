@@ -205,4 +205,74 @@ This signs `rknpu.ko` with the exact key embedded in the running Talos kernel (s
 
 ---
 
+## Bug 11: Talos imager ignores --base-installer-image vmlinuz; uses its own kernel
+
+**Symptom:** After upgrading with a custom installer that was built with `--base-installer-image` pointing to our vmlinuz-patched base, the running kernel still shows `Sidero Labs, Inc.: Build time throw-away kernel key` in `/proc/keys`. The rknpu module fails to load with `key was rejected by service`.
+
+**Root cause:** The Talos imager (`ghcr.io/siderolabs/imager`) has the Talos kernel binary embedded at `/usr/install/arm64/vmlinuz` **inside the imager image itself**. The `--base-installer-image` flag only controls the installer binary (grub, installer script) — the imager completely ignores any vmlinuz placed in the base installer image. The UKI is always built from the imager's own embedded kernel (with the Siderolabs ephemeral signing key).
+
+**How to verify:** Inspect the imager image:
+```bash
+podman create --platform linux/arm64 ghcr.io/siderolabs/imager:v1.12.6 | xargs podman export | tar -t | grep vmlinuz
+# shows: usr/install/arm64/vmlinuz  ← imager's own kernel
+```
+
+**Solution:** Build a **custom imager image** that replaces the imager's own kernel binary:
+```dockerfile
+FROM ghcr.io/siderolabs/imager:v1.12.6
+COPY vmlinuz /usr/install/arm64/vmlinuz
+```
+Then run the custom imager (no `--base-installer-image` needed, or use default siderolabs installer-base). See `scripts/build-installer.sh` for the full implementation.
+
+**Key insight:** The signing key is embedded in the kernel at compile time. Our bldr build at `PKGS_COMMIT=a92bed5` uses the same pre-committed signing key as the siderolabs build (the key in `certs/signing_key.pem` is committed to the pkgs source tree, making the build reproducible). This means our module signing key and the kernel's embedded key are the **same key** — the actual fix needed is ensuring the module is signed with `sha512` (matching `CONFIG_MODULE_SIG_SHA512=y`), not sha256.
+
+---
+
+## Bug 12: `machine.install.extraKernelArgs` silently ignored by `talosctl upgrade` (Talos 1.12)
+
+**Symptom:** After `talosctl upgrade`, the node boots with no network. Only loopback (127.0.0.1) is assigned. `talosctl dmesg` shows `network is unreachable` for every DNS/NTP attempt. The VLAN interface (`end0.60`) never appears.
+
+**Root cause:** In Talos 1.12, `machine.install.extraKernelArgs` is treated as an **initial-install-only** parameter. During `talosctl upgrade`, the imager builds a new UKI from its embedded kernel and the cmdline baked into the installer image — it does **not** re-read `machine.install.extraKernelArgs` from the machine config. Any kernel arguments that were only specified there are silently absent from the new UKI.
+
+**Concrete impact:** `vlan=end0.60:end0` and `ip=10.0.60.4::...::end0.60:off` were specified in `machine.install.extraKernelArgs`. After upgrade these were missing from the UKI cmdline, so the VLAN interface was never created and the node had no network access at boot — before Talos could apply the machine config that would have restored it.
+
+**Solution:** Bake all required kernel arguments into the **installer image** itself using `--extra-kernel-arg` flags when running the imager:
+
+```bash
+"${CONTAINER_RUNTIME}" run --rm \
+    -v "${INSTALLER_OUT}:/out" \
+    "${CUSTOM_IMAGER_REF}" \
+    installer \
+    --arch arm64 \
+    --extra-kernel-arg vlan=end0.60:end0 \
+    --extra-kernel-arg "ip=10.0.60.4::10.0.60.254:255.255.255.0::end0.60:off" \
+    --extra-kernel-arg talos.config=http://10.0.60.1:9090/worker.yaml \
+    ...
+```
+
+Arguments passed via `--extra-kernel-arg` are embedded in the UKI cmdline at image build time and survive upgrades. See `scripts/build-installer.sh`.
+
+**Note:** `machine.install.extraKernelArgs` is not entirely useless — it applies on the very first install (from maintenance mode). But for anything that must survive upgrades, the installer image is the only reliable location.
+
+---
+
+## Bug 13: turingrk1 sbc-rockchip overlay repartitions eMMC during `talosctl upgrade`, destroying STATE and META
+
+**Symptom:** After `talosctl upgrade --preserve --image <custom-installer>`, the node reboots but Talos enters an install loop — it has no machine config, no cluster identity, and no installed extensions. `talosctl disks` on the node shows the eMMC has been completely repartitioned.
+
+**Root cause:** The `ghcr.io/siderolabs/sbc-rockchip` overlay for `turingrk1` contains an `installers/turingrk1` binary that uses `*overlay.PartitionOptions`. This signals to the Talos installer that the overlay needs to control the partition layout. The Talos installer honors this by performing a **full disk repartition** regardless of the `--preserve` flag. Partitions p4 (META) and p5 (STATE) are wiped, destroying the machine config and cluster secrets.
+
+**Why `--preserve` doesn't help:** `--preserve` prevents the installer from wiping the STATE filesystem contents, but only if STATE survives repartitioning. When the partition table itself is rewritten (as the turingrk1 overlay demands), STATE is destroyed before `--preserve` logic can act.
+
+**Consequence (compound with Bug 12):** After STATE is wiped, the node has no machine config. On next boot it enters maintenance mode and fetches config from the URL embedded in the UKI cmdline (the schematic's `talos.config=` arg). If that URL points to the wrong config (e.g., an old non-NPU config), the node reinstalls with the wrong installer image, reverting all customization.
+
+**Mitigation (until overlay is fixed):**
+1. Bake `talos.config=http://<correct-server>/worker.yaml` into the installer via `--extra-kernel-arg` so that even after STATE is wiped, the node fetches the correct config.
+2. Ensure the config server at that URL always serves the current NPU machine config.
+3. Accept that each upgrade is effectively a full reinstall; the node will re-apply config automatically once it can reach the config server.
+
+**Permanent fix (TODO):** Investigate whether a custom overlay without `PartitionOptions` can avoid repartitioning on upgrade while still laying down the correct U-Boot + DTB for the Turing RK1.
+
+---
+
 *Add new bugs above this line, most recent first.*
