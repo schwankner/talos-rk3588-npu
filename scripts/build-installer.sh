@@ -294,12 +294,14 @@ DOCKERFILE
 
 COMBINED_REF="combined-installer:${TALOS_VERSION#v}"
 if [ "${CONTAINER_RUNTIME}" = "docker" ]; then
-    docker buildx build \
-        --builder "${BUILDER_NAME}" \
-        --platform linux/arm64 \
-        --tag "${COMBINED_REF}" \
-        --load \
-        "${COMBINED_CTX}"
+    # docker buildx uses an isolated image store (docker-container driver) and
+    # cannot see images loaded into the Docker daemon via `docker load`.  Use
+    # `docker commit` against the daemon directly so no registry round-trip is
+    # needed and no buildx image-store isolation issue arises.
+    PATCH_CID=$(docker create "${OVERLAY_REF}")
+    docker cp "${COMBINED_CTX}/vmlinuz.efi" "${PATCH_CID}:/usr/install/arm64/vmlinuz.efi"
+    docker commit "${PATCH_CID}" "${COMBINED_REF}"
+    docker rm "${PATCH_CID}"
 else
     podman build \
         --platform linux/arm64 \
