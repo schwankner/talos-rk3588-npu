@@ -58,7 +58,7 @@ steps:
         # the key used to build the kernel.  The kernel-build stage keeps the
         # signing key at /src/certs/signing_key.pem and the matching X.509
         # certificate at /src/certs/signing_key.x509.  Sign before install.
-        /src/scripts/sign-file sha256 \
+        /src/scripts/sign-file sha512 \
           /src/certs/signing_key.pem \
           /src/certs/signing_key.x509 \
           rknpu.ko
