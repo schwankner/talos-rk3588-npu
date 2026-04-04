@@ -48,36 +48,52 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# rockchip-rknpu — kernel module, requires siderolabs/pkgs tree
+# Shared pkgs tree setup — downloaded once, reused for both targets
 # ---------------------------------------------------------------------------
 
-build_rknpu() {
-    log "Building rockchip-rknpu (driver ${RKNPU_VERSION}, kernel ${KERNEL_VERSION})..."
+# PKGS_WORK_DIR is set by setup_pkgs_tree; callers must call that first.
+PKGS_WORK_DIR=""
 
-    WORK_DIR="$(mktemp -d)"
-    trap 'rm -rf "${WORK_DIR}"' RETURN
+setup_pkgs_tree() {
+    if [ -n "${PKGS_WORK_DIR}" ]; then
+        return  # already set up
+    fi
+
+    PKGS_WORK_DIR="$(mktemp -d)"
+    # shellcheck disable=SC2064
+    trap 'rm -rf "${PKGS_WORK_DIR}"' EXIT
 
     log "Downloading siderolabs/pkgs @ ${PKGS_COMMIT}..."
     # GitHub archive API returns a tarball for any commit SHA — avoids the
     # git fetch limitations with shallow clones and commit SHA refs.
     curl -fsSL \
         "https://github.com/siderolabs/pkgs/archive/${PKGS_COMMIT}.tar.gz" \
-        -o "${WORK_DIR}/pkgs.tar.gz"
-    mkdir -p "${WORK_DIR}/pkgs"
-    tar -xzf "${WORK_DIR}/pkgs.tar.gz" \
+        -o "${PKGS_WORK_DIR}/pkgs.tar.gz"
+    mkdir -p "${PKGS_WORK_DIR}/pkgs"
+    tar -xzf "${PKGS_WORK_DIR}/pkgs.tar.gz" \
         --strip-components=1 \
-        -C "${WORK_DIR}/pkgs"
+        -C "${PKGS_WORK_DIR}/pkgs"
 
-    # Copy our extension into the pkgs tree so bldr can resolve stage: kernel-build
-    # LLVM_IMAGE / LLVM_REV are defined in rockchip-rknpu/vars.yaml, not injected here.
-    cp -r "${REPO_ROOT}/rockchip-rknpu" "${WORK_DIR}/pkgs/rockchip-rknpu"
+    # Inject both extension packages into the pkgs tree so bldr can resolve
+    # stage: base and stage: kernel-build dependencies.
+    cp -r "${REPO_ROOT}/rockchip-rknpu"    "${PKGS_WORK_DIR}/pkgs/rockchip-rknpu"
+    cp -r "${REPO_ROOT}/rockchip-rknn-libs" "${PKGS_WORK_DIR}/pkgs/rockchip-rknn-libs"
+}
+
+# ---------------------------------------------------------------------------
+# rockchip-rknpu — kernel module, requires siderolabs/pkgs tree
+# ---------------------------------------------------------------------------
+
+build_rknpu() {
+    log "Building rockchip-rknpu (driver ${RKNPU_VERSION}, kernel ${KERNEL_VERSION})..."
+    setup_pkgs_tree
 
     local tag="${RKNPU_VERSION}-${KERNEL_VERSION}"
     local image="${REGISTRY}/rockchip-rknpu:${tag}"
 
     docker buildx build \
         --builder "${BUILDER_NAME}" \
-        --file "${WORK_DIR}/pkgs/Pkgfile" \
+        --file "${PKGS_WORK_DIR}/pkgs/Pkgfile" \
         --target rockchip-rknpu \
         --platform linux/arm64 \
         --build-arg TAG="${BUILD_ARG_TAG}" \
@@ -86,24 +102,25 @@ build_rknpu() {
         --cache-to   "type=registry,ref=${CACHE_REGISTRY}/rockchip-rknpu,mode=max" \
         --tag "${image}" \
         --push \
-        "${WORK_DIR}/pkgs"
+        "${PKGS_WORK_DIR}/pkgs"
 
     log "Pushed: ${image}"
 }
 
 # ---------------------------------------------------------------------------
-# rockchip-rknn-libs — librknnrt.so, standalone bldr build
+# rockchip-rknn-libs — librknnrt.so, built inside pkgs tree (needs base stage)
 # ---------------------------------------------------------------------------
 
 build_rknn_libs() {
     log "Building rockchip-rknn-libs (librknnrt ${RKNN_RUNTIME_VERSION}, kernel ${KERNEL_VERSION})..."
+    setup_pkgs_tree
 
     local tag="${RKNN_RUNTIME_VERSION}-${KERNEL_VERSION}"
     local image="${REGISTRY}/rockchip-rknn-libs:${tag}"
 
     docker buildx build \
         --builder "${BUILDER_NAME}" \
-        --file "${REPO_ROOT}/Pkgfile" \
+        --file "${PKGS_WORK_DIR}/pkgs/Pkgfile" \
         --target rockchip-rknn-libs \
         --platform linux/arm64 \
         --build-arg TAG="${BUILD_ARG_TAG}" \
@@ -112,7 +129,7 @@ build_rknn_libs() {
         --cache-to   "type=registry,ref=${CACHE_REGISTRY}/rockchip-rknn-libs,mode=max" \
         --tag "${image}" \
         --push \
-        "${REPO_ROOT}"
+        "${PKGS_WORK_DIR}/pkgs"
 
     log "Pushed: ${image}"
 }
