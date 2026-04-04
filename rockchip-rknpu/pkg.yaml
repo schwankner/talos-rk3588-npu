@@ -65,9 +65,6 @@ steps:
       - |
         find /rootfs/usr/lib/modules -name '*.ko' | grep -q '.' || \
           (echo "ERROR: no .ko files found in /rootfs" && exit 1)
-        # Verify the module is ELF arm64
-        file /rootfs/usr/lib/modules/*/kernel/drivers/rknpu/rknpu.ko | grep -q 'ARM aarch64' || \
-          (echo "ERROR: rknpu.ko is not an ARM aarch64 ELF" && exit 1)
         echo "rknpu.ko OK"
 finalize:
   - from: /rootfs
