@@ -214,24 +214,12 @@ fi
 log "Loaded image: ${LOADED_IMAGE}"
 
 log "Pushing installer to ${INSTALLER_IMAGE}..."
-if [ "${CONTAINER_RUNTIME}" = "docker" ]; then
-    # Build a trivial wrapper Dockerfile that FROMs the loaded image.
-    # This uses docker buildx build --push which handles GHCR package creation correctly.
-    INSTALLER_RETAG_CTX="${PKGS_WORK_DIR}/installer-retag-ctx"
-    mkdir -p "${INSTALLER_RETAG_CTX}"
-    cat > "${INSTALLER_RETAG_CTX}/Dockerfile" <<DOCKERFILE
-FROM ${LOADED_IMAGE}
-DOCKERFILE
-    docker buildx build \
-        --builder "${BUILDER_NAME}" \
-        --platform linux/arm64 \
-        --tag "${INSTALLER_IMAGE}" \
-        --push \
-        "${INSTALLER_RETAG_CTX}"
-else
-    podman tag "${LOADED_IMAGE}" "${INSTALLER_IMAGE}"
-    podman push "${INSTALLER_IMAGE}"
-fi
+# Tag and push the imager output directly from the Docker daemon.
+# We push to an EXISTING package (installer-base) with a new tag — this avoids
+# GHCR org-level restrictions that block creating brand-new packages via GITHUB_TOKEN.
+# The Docker daemon already has the imager output loaded from the tar.
+"${CONTAINER_RUNTIME}" tag "${LOADED_IMAGE}" "${INSTALLER_IMAGE}"
+"${CONTAINER_RUNTIME}" push "${INSTALLER_IMAGE}"
 
 log "Done! Installer pushed: ${INSTALLER_IMAGE}"
 log ""
