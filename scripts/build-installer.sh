@@ -15,6 +15,9 @@
 #
 # Usage:
 #   REGISTRY=ghcr.io/schwankner ./scripts/build-installer.sh
+#
+# Environment variables:
+#   CONTAINER_RUNTIME  Override container runtime (default: podman; use docker in CI)
 
 set -euo pipefail
 
@@ -26,6 +29,7 @@ REPO_ROOT="$(dirname "${SCRIPT_DIR}")"
 REGISTRY="${REGISTRY:-ghcr.io/schwankner}"
 BUILD_ARG_TAG="${BUILD_ARG_TAG:-${KERNEL_VERSION}}"
 CACHE_REGISTRY="${CACHE_REGISTRY:-${REGISTRY}/build-cache}"
+CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-podman}"
 
 INSTALLER_IMAGE="${REGISTRY}/talos-rk3588-npu-installer:v${TALOS_VERSION#v}"
 INSTALLER_BASE_IMAGE="${REGISTRY}/talos-rk3588-npu-installer-base:v${TALOS_VERSION#v}"
@@ -39,7 +43,7 @@ require_cmd() {
     fi
 }
 
-require_cmd docker
+require_cmd "${CONTAINER_RUNTIME}"
 require_cmd curl
 
 # ---------------------------------------------------------------------------
@@ -71,15 +75,20 @@ setup_pkgs_tree() {
 }
 
 # ---------------------------------------------------------------------------
-# Shared buildx builder
+# buildx builder setup (docker only; podman uses native buildah backend)
 # ---------------------------------------------------------------------------
 
 BUILDER_NAME="talos-rk3588-builder"
-if ! docker buildx inspect "${BUILDER_NAME}" >/dev/null 2>&1; then
-    log "Creating buildx builder ${BUILDER_NAME}..."
-    docker buildx create --name "${BUILDER_NAME}" --driver docker-container --use
+if [ "${CONTAINER_RUNTIME}" = "docker" ]; then
+    if ! docker buildx inspect "${BUILDER_NAME}" >/dev/null 2>&1; then
+        log "Creating buildx builder ${BUILDER_NAME}..."
+        docker buildx create --name "${BUILDER_NAME}" --driver docker-container --use
+    else
+        docker buildx use "${BUILDER_NAME}"
+    fi
+    BUILDX_CMD="docker buildx build --builder ${BUILDER_NAME}"
 else
-    docker buildx use "${BUILDER_NAME}"
+    BUILDX_CMD="podman build"
 fi
 
 # ---------------------------------------------------------------------------
@@ -92,8 +101,8 @@ setup_pkgs_tree
 KERNEL_OUT="${PKGS_WORK_DIR}/kernel-out"
 mkdir -p "${KERNEL_OUT}"
 
-docker buildx build \
-    --builder "${BUILDER_NAME}" \
+# shellcheck disable=SC2086
+${BUILDX_CMD} \
     --file "${PKGS_WORK_DIR}/pkgs/Pkgfile" \
     --target kernel \
     --platform linux/arm64 \
@@ -149,12 +158,20 @@ FROM ghcr.io/siderolabs/installer-base:v${TALOS_VERSION#v}
 COPY vmlinuz ${VMLINUZ_DEST}
 DOCKERFILE
 
-docker buildx build \
-    --builder "${BUILDER_NAME}" \
-    --platform linux/arm64 \
-    --tag "${INSTALLER_BASE_IMAGE}" \
-    --push \
-    "${INSTALLER_BASE_CTX}"
+if [ "${CONTAINER_RUNTIME}" = "docker" ]; then
+    docker buildx build \
+        --builder "${BUILDER_NAME}" \
+        --platform linux/arm64 \
+        --tag "${INSTALLER_BASE_IMAGE}" \
+        --push \
+        "${INSTALLER_BASE_CTX}"
+else
+    podman build \
+        --platform linux/arm64 \
+        --tag "${INSTALLER_BASE_IMAGE}" \
+        "${INSTALLER_BASE_CTX}"
+    podman push "${INSTALLER_BASE_IMAGE}"
+fi
 
 log "Pushed installer-base: ${INSTALLER_BASE_IMAGE}"
 
@@ -167,7 +184,7 @@ log "Building installer with Talos imager..."
 INSTALLER_OUT="${PKGS_WORK_DIR}/installer-out"
 mkdir -p "${INSTALLER_OUT}"
 
-docker run --rm \
+"${CONTAINER_RUNTIME}" run --rm \
     -v "${INSTALLER_OUT}:/out" \
     "ghcr.io/siderolabs/imager:v${TALOS_VERSION#v}" \
     installer \
@@ -180,9 +197,18 @@ docker run --rm \
     2>&1
 
 log "Loading and pushing installer to ${INSTALLER_IMAGE}..."
-docker load -i "${INSTALLER_OUT}/installer-arm64.tar"
-docker tag "ghcr.io/siderolabs/installer-base:v${TALOS_VERSION#v}" "${INSTALLER_IMAGE}"
-docker push "${INSTALLER_IMAGE}"
+"${CONTAINER_RUNTIME}" load -i "${INSTALLER_OUT}/installer-arm64.tar"
+# The imager tags the loaded image — find and retag it
+LOADED_IMAGE=$("${CONTAINER_RUNTIME}" images --format '{{.Repository}}:{{.Tag}}' \
+    | grep -E "siderolabs/installer|siderolabs/talos" | head -1)
+if [ -z "${LOADED_IMAGE}" ]; then
+    echo "ERROR: Could not find loaded installer image" >&2
+    "${CONTAINER_RUNTIME}" images >&2
+    exit 1
+fi
+log "Loaded image: ${LOADED_IMAGE}"
+"${CONTAINER_RUNTIME}" tag "${LOADED_IMAGE}" "${INSTALLER_IMAGE}"
+"${CONTAINER_RUNTIME}" push "${INSTALLER_IMAGE}"
 
 log "Done! Installer pushed: ${INSTALLER_IMAGE}"
 log ""

@@ -25,9 +25,15 @@ jobs:
     uses: ./.github/workflows/build-device-plugin.yaml
     secrets: inherit
 
+  build-installer:
+    name: Build custom installer
+    needs: [build-extensions]
+    uses: ./.github/workflows/build-installer.yaml
+    secrets: inherit
+
   release:
     name: Create GitHub Release
-    needs: [build-extensions, build-plugin]
+    needs: [build-extensions, build-plugin, build-installer]
     runs-on: ubuntu-24.04-arm
 
     steps:
@@ -125,6 +131,16 @@ jobs:
           \`\`\`bash
           # Load into a local registry or use with crane/skopeo
           docker load < rockchip-rknpu-${{ steps.versions.outputs.RKNPU_VERSION }}-${{ steps.versions.outputs.KERNEL_VERSION }}.tar
+          \`\`\`
+
+          ## Installer
+
+          Custom Talos installer with our kernel binary (required for module signing key to match):
+
+          \`\`\`bash
+          talosctl upgrade --nodes <IP> \\
+            --image ghcr.io/${OWNER}/talos-rk3588-npu-installer:v${{ steps.versions.outputs.TALOS_VERSION#v }} \\
+            --preserve
           \`\`\`
 
           ## Device Plugin

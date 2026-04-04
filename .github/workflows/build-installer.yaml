@@ -1,0 +1,89 @@
+name: Build Installer
+
+on:
+  workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: "Force rebuild even if installer image already exists in GHCR"
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      force_rebuild:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: Build custom installer
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version pins
+        id: versions
+        run: |
+          source scripts/common.sh
+          echo "TALOS_VERSION=${TALOS_VERSION}"   >> "${GITHUB_OUTPUT}"
+          echo "KERNEL_VERSION=${KERNEL_VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "PKGS_COMMIT=${PKGS_COMMIT}"       >> "${GITHUB_OUTPUT}"
+
+      - name: Check if installer already exists
+        id: cache
+        run: |
+          source scripts/common.sh
+          OWNER="${{ github.repository_owner }}"
+          INSTALLER_IMAGE="ghcr.io/${OWNER}/talos-rk3588-npu-installer:v${TALOS_VERSION#v}"
+          FORCE="${{ inputs.force_rebuild }}"
+          if [[ "${FORCE}" == "true" ]]; then
+            echo "skip=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          SKIP=true
+          docker manifest inspect "${INSTALLER_IMAGE}" >/dev/null 2>&1 || SKIP=false
+          echo "skip=${SKIP}" >> "${GITHUB_OUTPUT}"
+
+      - name: Log in to GHCR
+        if: steps.cache.outputs.skip != 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        if: steps.cache.outputs.skip != 'true'
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker-container
+
+      - name: Build installer
+        if: steps.cache.outputs.skip != 'true'
+        env:
+          REGISTRY: "ghcr.io/${{ github.repository_owner }}"
+          CACHE_REGISTRY: "ghcr.io/${{ github.repository_owner }}/build-cache"
+          CONTAINER_RUNTIME: docker
+        run: |
+          source scripts/common.sh
+          REGISTRY="${REGISTRY}" \
+          CACHE_REGISTRY="${CACHE_REGISTRY}" \
+          CONTAINER_RUNTIME=docker \
+          bash scripts/build-installer.sh
+
+      - name: Summary
+        run: |
+          source scripts/common.sh
+          OWNER="${{ github.repository_owner }}"
+          echo "### Installer Image" >> "${GITHUB_STEP_SUMMARY}"
+          echo "" >> "${GITHUB_STEP_SUMMARY}"
+          echo "\`ghcr.io/${OWNER}/talos-rk3588-npu-installer:v${TALOS_VERSION#v}\`" >> "${GITHUB_STEP_SUMMARY}"
+          echo "" >> "${GITHUB_STEP_SUMMARY}"
+          echo "Upgrade with:" >> "${GITHUB_STEP_SUMMARY}"
+          echo "\`\`\`bash" >> "${GITHUB_STEP_SUMMARY}"
+          echo "talosctl upgrade --nodes <IP> --image ghcr.io/${OWNER}/talos-rk3588-npu-installer:v${TALOS_VERSION#v} --preserve" >> "${GITHUB_STEP_SUMMARY}"
+          echo "\`\`\`" >> "${GITHUB_STEP_SUMMARY}"
