@@ -6,12 +6,18 @@
 # key generated during our bldr rebuild does NOT match the key embedded in the
 # officially distributed siderolabs kernel binary.
 #
+# Root cause: the Talos imager (ghcr.io/siderolabs/imager) has the siderolabs
+# kernel binary embedded at /usr/install/arm64/vmlinuz inside the imager image
+# itself.  The --base-installer-image flag only controls the installer binary
+# (grub, installer script) — the imager ignores any vmlinuz placed in the
+# base installer image.
+#
 # Solution:
 #   1. Export the kernel binary from our bldr build (same PKGS_COMMIT → same
 #      signing key that was used to sign rknpu.ko).
-#   2. Create a custom installer-base image that swaps the siderolabs vmlinuz
-#      with our own (both built from identical source; only the signing key differs).
-#   3. Build the final installer via the Talos imager using our custom base.
+#   2. Create a custom imager image that replaces the siderolabs vmlinuz with
+#      ours (FROM siderolabs/imager + COPY our vmlinuz).
+#   3. Build the final installer via our custom imager.
 #
 # Usage:
 #   REGISTRY=ghcr.io/schwankner ./scripts/build-installer.sh
@@ -31,14 +37,9 @@ BUILD_ARG_TAG="${BUILD_ARG_TAG:-${KERNEL_VERSION}}"
 CACHE_REGISTRY="${CACHE_REGISTRY:-${REGISTRY}/build-cache}"
 CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-podman}"
 
-# Both the intermediate base and the final installer live in the same GHCR package
-# (talos-rk3588-npu-installer-base) to avoid GHCR org-level restrictions on
-# creating new packages via GITHUB_TOKEN.
-# Tag convention:
-#   v<TALOS_VERSION>       — intermediate base (vmlinuz swapped, used by imager)
-#   installer-v<TALOS_VERSION> — final installer (imager output, used by talosctl upgrade)
+# The final installer image reuses the existing installer-base package to avoid
+# GHCR org-level restrictions on creating brand-new packages.
 INSTALLER_IMAGE="${REGISTRY}/talos-rk3588-npu-installer-base:installer-v${TALOS_VERSION#v}"
-INSTALLER_BASE_IMAGE="${REGISTRY}/talos-rk3588-npu-installer-base:v${TALOS_VERSION#v}"
 
 log() { echo "[build-installer] $*"; }
 
@@ -141,61 +142,63 @@ fi
 log "Using vmlinuz: ${VMLINUZ}"
 
 # ---------------------------------------------------------------------------
-# Step 2: Build custom installer-base (swap siderolabs vmlinuz → ours)
+# Step 2: Build custom imager (replace siderolabs vmlinuz → ours)
+#
+# The siderolabs imager image has the kernel at /usr/install/arm64/vmlinuz.
+# The --base-installer-image flag does NOT affect which kernel is used for
+# the UKI build — the imager always uses its own embedded vmlinuz.
+# We must therefore replace the vmlinuz INSIDE the imager image.
 # ---------------------------------------------------------------------------
 
-log "Building custom installer-base ${INSTALLER_BASE_IMAGE}..."
+log "Building custom imager with our kernel (replaces siderolabs vmlinuz)..."
 
-# Determine the target path inside installer-base
-VMLINUZ_DEST="/usr/install/arm64/vmlinuz"
+CUSTOM_IMAGER_CTX="${PKGS_WORK_DIR}/custom-imager-ctx"
+mkdir -p "${CUSTOM_IMAGER_CTX}"
+cp "${VMLINUZ}" "${CUSTOM_IMAGER_CTX}/vmlinuz"
 
-# Build context: copy vmlinuz into a temp dir
-INSTALLER_BASE_CTX="${PKGS_WORK_DIR}/installer-base-ctx"
-mkdir -p "${INSTALLER_BASE_CTX}"
-cp "${VMLINUZ}" "${INSTALLER_BASE_CTX}/vmlinuz"
-
-cat > "${INSTALLER_BASE_CTX}/Dockerfile" <<DOCKERFILE
-FROM ghcr.io/siderolabs/installer-base:v${TALOS_VERSION#v}
+cat > "${CUSTOM_IMAGER_CTX}/Dockerfile" <<DOCKERFILE
+FROM ghcr.io/siderolabs/imager:v${TALOS_VERSION#v}
 
 # Replace the siderolabs kernel (which has siderolabs' ephemeral signing key)
 # with our own kernel built from the same PKGS_COMMIT source.
-# Both kernels are functionally identical; only the module signing key differs.
-# Our rknpu.ko is signed with our key -> must boot with our kernel.
-COPY vmlinuz ${VMLINUZ_DEST}
+# The imager reads /usr/install/arm64/vmlinuz to build the UKI — this is the
+# correct location, NOT the --base-installer-image.
+COPY vmlinuz /usr/install/arm64/vmlinuz
 DOCKERFILE
 
 if [ "${CONTAINER_RUNTIME}" = "docker" ]; then
+    # Build locally (no push needed — we run the imager immediately)
     docker buildx build \
         --builder "${BUILDER_NAME}" \
         --platform linux/arm64 \
-        --tag "${INSTALLER_BASE_IMAGE}" \
-        --push \
-        "${INSTALLER_BASE_CTX}"
+        --tag "custom-imager:${TALOS_VERSION#v}" \
+        --load \
+        "${CUSTOM_IMAGER_CTX}"
+    CUSTOM_IMAGER_REF="custom-imager:${TALOS_VERSION#v}"
 else
     podman build \
         --platform linux/arm64 \
-        --tag "${INSTALLER_BASE_IMAGE}" \
-        "${INSTALLER_BASE_CTX}"
-    podman push "${INSTALLER_BASE_IMAGE}"
+        --tag "custom-imager:${TALOS_VERSION#v}" \
+        "${CUSTOM_IMAGER_CTX}"
+    CUSTOM_IMAGER_REF="custom-imager:${TALOS_VERSION#v}"
 fi
 
-log "Pushed installer-base: ${INSTALLER_BASE_IMAGE}"
+log "Custom imager ready: ${CUSTOM_IMAGER_REF}"
 
 # ---------------------------------------------------------------------------
-# Step 3: Build final installer via Talos imager
+# Step 3: Build final installer via our custom imager
 # ---------------------------------------------------------------------------
 
-log "Building installer with Talos imager..."
+log "Building installer with custom imager..."
 
 INSTALLER_OUT="${PKGS_WORK_DIR}/installer-out"
 mkdir -p "${INSTALLER_OUT}"
 
 "${CONTAINER_RUNTIME}" run --rm \
     -v "${INSTALLER_OUT}:/out" \
-    "ghcr.io/siderolabs/imager:v${TALOS_VERSION#v}" \
+    "${CUSTOM_IMAGER_REF}" \
     installer \
     --arch arm64 \
-    --base-installer-image "${INSTALLER_BASE_IMAGE}" \
     --overlay-image ghcr.io/siderolabs/sbc-rockchip:v0.2.0 \
     --overlay-name turingrk1 \
     --system-extension-image "ghcr.io/${REGISTRY#ghcr.io/}/rockchip-rknpu:${RKNPU_VERSION}-${KERNEL_VERSION}" \
@@ -217,7 +220,6 @@ log "Pushing installer to ${INSTALLER_IMAGE}..."
 # Tag and push the imager output directly from the Docker daemon.
 # We push to an EXISTING package (installer-base) with a new tag — this avoids
 # GHCR org-level restrictions that block creating brand-new packages via GITHUB_TOKEN.
-# The Docker daemon already has the imager output loaded from the tar.
 "${CONTAINER_RUNTIME}" tag "${LOADED_IMAGE}" "${INSTALLER_IMAGE}"
 "${CONTAINER_RUNTIME}" push "${INSTALLER_IMAGE}"
 

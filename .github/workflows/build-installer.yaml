@@ -38,6 +38,7 @@ jobs:
         run: |
           source scripts/common.sh
           OWNER="${{ github.repository_owner }}"
+          # Installer is tagged as installer-v<talos> on the installer-base package
           INSTALLER_IMAGE="ghcr.io/${OWNER}/talos-rk3588-npu-installer-base:installer-v${TALOS_VERSION#v}"
           FORCE="${{ inputs.force_rebuild }}"
           if [[ "${FORCE}" == "true" ]]; then
@@ -67,7 +68,6 @@ jobs:
         env:
           REGISTRY: "ghcr.io/${{ github.repository_owner }}"
           CACHE_REGISTRY: "ghcr.io/${{ github.repository_owner }}/build-cache"
-          CONTAINER_RUNTIME: docker
         run: |
           source scripts/common.sh
           REGISTRY="${REGISTRY}" \
