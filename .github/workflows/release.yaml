@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to release (e.g. v1.12.6-rknpu0.9.8)"
+        description: "Tag to release (e.g. v1.12.6-rknpu0.9.8-rc1)"
         required: true
 
 permissions:
@@ -28,7 +28,7 @@ jobs:
   release:
     name: Create GitHub Release
     needs: [build-extensions, build-plugin]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
 
     steps:
       - uses: actions/checkout@v4
@@ -51,8 +51,50 @@ jobs:
             echo "TAG=${{ github.event.inputs.tag }}" >> "${GITHUB_OUTPUT}"
           fi
 
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Export extension OCI tarballs
+        id: artifacts
+        run: |
+          source scripts/common.sh
+          OWNER="${{ github.repository_owner }}"
+
+          RKNPU_IMAGE="ghcr.io/${OWNER}/rockchip-rknpu:${RKNPU_VERSION}-${KERNEL_VERSION}"
+          RKNN_IMAGE="ghcr.io/${OWNER}/rockchip-rknn-libs:${RKNN_RUNTIME_VERSION}-${KERNEL_VERSION}"
+
+          RKNPU_FILE="rockchip-rknpu-${RKNPU_VERSION}-${KERNEL_VERSION}.tar"
+          RKNN_FILE="rockchip-rknn-libs-${RKNN_RUNTIME_VERSION}-${KERNEL_VERSION}.tar"
+
+          echo "Pulling ${RKNPU_IMAGE}..."
+          docker pull --platform linux/arm64 "${RKNPU_IMAGE}"
+          docker save "${RKNPU_IMAGE}" -o "${RKNPU_FILE}"
+
+          echo "Pulling ${RKNN_IMAGE}..."
+          docker pull --platform linux/arm64 "${RKNN_IMAGE}"
+          docker save "${RKNN_IMAGE}" -o "${RKNN_FILE}"
+
+          echo "RKNPU_FILE=${RKNPU_FILE}" >> "${GITHUB_OUTPUT}"
+          echo "RKNN_FILE=${RKNN_FILE}"   >> "${GITHUB_OUTPUT}"
+
+          # Checksums for verification
+          sha256sum "${RKNPU_FILE}" "${RKNN_FILE}" > SHA256SUMS
+
+      - name: Determine if prerelease
+        id: prerelease
+        run: |
+          TAG="${{ steps.ref.outputs.TAG }}"
+          if [[ "${TAG}" == *"-rc"* ]] || [[ "${TAG}" == *"-alpha"* ]] || [[ "${TAG}" == *"-beta"* ]]; then
+            echo "prerelease=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "prerelease=false" >> "${GITHUB_OUTPUT}"
+          fi
+
       - name: Create release body
-        id: body
         run: |
           OWNER="${{ github.repository_owner }}"
           TAG="${{ steps.ref.outputs.TAG }}"
@@ -66,9 +108,9 @@ jobs:
           | rknpu driver | ${{ steps.versions.outputs.RKNPU_VERSION }} |
           | librknnrt | ${{ steps.versions.outputs.RKNN_RUNTIME_VERSION }} |
 
-          ## Extension Images
+          ## System Extensions
 
-          Add to your Talos machine config \`machine.install.extensions\`:
+          Reference directly in your Talos machine config under \`machine.install.extensions\`:
 
           \`\`\`yaml
           machine:
@@ -78,17 +120,27 @@ jobs:
                 - image: ghcr.io/${OWNER}/rockchip-rknn-libs:${{ steps.versions.outputs.RKNN_RUNTIME_VERSION }}-${{ steps.versions.outputs.KERNEL_VERSION }}
           \`\`\`
 
+          The attached \`.tar\` files are OCI image archives for offline use:
+
+          \`\`\`bash
+          # Load into a local registry or use with crane/skopeo
+          docker load < rockchip-rknpu-${{ steps.versions.outputs.RKNPU_VERSION }}-${{ steps.versions.outputs.KERNEL_VERSION }}.tar
+          \`\`\`
+
           ## Device Plugin
 
           \`\`\`yaml
           image: ghcr.io/${OWNER}/rk3588-npu-device-plugin:${TAG}
           \`\`\`
 
+          See [deploy/device-plugin.yaml](https://github.com/${OWNER}/talos-rk3588-npu/blob/main/deploy/device-plugin.yaml) for the full DaemonSet manifest.
+
           ## Requirements
 
-          - Talos ${{ steps.versions.outputs.TALOS_VERSION }} with sbc-rockchip overlay (factory.talos.dev schematic)
-          - \`user.max_user_namespaces: "15000"\` sysctl (for procMount:Unmasked)
+          - Talos ${{ steps.versions.outputs.TALOS_VERSION }} with \`sbc-rockchip\` overlay (via [factory.talos.dev](https://factory.talos.dev))
+          - Kernel 6.18+ (for \`MOUNT_ATTR_IDMAP\` tmpfs — required by \`procMount: Unmasked\`)
           - Pods must set \`spec.hostUsers: false\` and \`containers[].securityContext.procMount: Unmasked\`
+          - \`user.max_user_namespaces: "15000"\` sysctl on nodes
           EOF
 
       - name: Create GitHub Release
@@ -98,4 +150,8 @@ jobs:
           name: "${{ steps.ref.outputs.TAG }}"
           body_path: /tmp/release-body.md
           draft: false
-          prerelease: false
+          prerelease: ${{ steps.prerelease.outputs.prerelease }}
+          files: |
+            ${{ steps.artifacts.outputs.RKNPU_FILE }}
+            ${{ steps.artifacts.outputs.RKNN_FILE }}
+            SHA256SUMS
