@@ -139,7 +139,7 @@ jobs:
 
           \`\`\`bash
           talosctl upgrade --nodes <IP> \\
-            --image ghcr.io/${OWNER}/talos-rk3588-npu-installer:v${{ steps.versions.outputs.TALOS_VERSION#v }} \\
+            --image ghcr.io/${OWNER}/talos-rk3588-npu-installer-base:installer-v${{ steps.versions.outputs.TALOS_VERSION }} \\
             --preserve
           \`\`\`
 

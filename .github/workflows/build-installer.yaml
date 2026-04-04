@@ -38,7 +38,7 @@ jobs:
         run: |
           source scripts/common.sh
           OWNER="${{ github.repository_owner }}"
-          INSTALLER_IMAGE="ghcr.io/${OWNER}/talos-rk3588-npu-installer:v${TALOS_VERSION#v}"
+          INSTALLER_IMAGE="ghcr.io/${OWNER}/talos-rk3588-npu-installer-base:installer-v${TALOS_VERSION#v}"
           FORCE="${{ inputs.force_rebuild }}"
           if [[ "${FORCE}" == "true" ]]; then
             echo "skip=false" >> "${GITHUB_OUTPUT}"
@@ -81,9 +81,9 @@ jobs:
           OWNER="${{ github.repository_owner }}"
           echo "### Installer Image" >> "${GITHUB_STEP_SUMMARY}"
           echo "" >> "${GITHUB_STEP_SUMMARY}"
-          echo "\`ghcr.io/${OWNER}/talos-rk3588-npu-installer:v${TALOS_VERSION#v}\`" >> "${GITHUB_STEP_SUMMARY}"
+          echo "\`ghcr.io/${OWNER}/talos-rk3588-npu-installer-base:installer-v${TALOS_VERSION#v}\`" >> "${GITHUB_STEP_SUMMARY}"
           echo "" >> "${GITHUB_STEP_SUMMARY}"
           echo "Upgrade with:" >> "${GITHUB_STEP_SUMMARY}"
           echo "\`\`\`bash" >> "${GITHUB_STEP_SUMMARY}"
-          echo "talosctl upgrade --nodes <IP> --image ghcr.io/${OWNER}/talos-rk3588-npu-installer:v${TALOS_VERSION#v} --preserve" >> "${GITHUB_STEP_SUMMARY}"
+          echo "talosctl upgrade --nodes <IP> --image ghcr.io/${OWNER}/talos-rk3588-npu-installer-base:installer-v${TALOS_VERSION#v} --preserve" >> "${GITHUB_STEP_SUMMARY}"
           echo "\`\`\`" >> "${GITHUB_STEP_SUMMARY}"

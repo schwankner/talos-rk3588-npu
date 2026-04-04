@@ -31,7 +31,13 @@ BUILD_ARG_TAG="${BUILD_ARG_TAG:-${KERNEL_VERSION}}"
 CACHE_REGISTRY="${CACHE_REGISTRY:-${REGISTRY}/build-cache}"
 CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-podman}"
 
-INSTALLER_IMAGE="${REGISTRY}/talos-rk3588-npu-installer:v${TALOS_VERSION#v}"
+# Both the intermediate base and the final installer live in the same GHCR package
+# (talos-rk3588-npu-installer-base) to avoid GHCR org-level restrictions on
+# creating new packages via GITHUB_TOKEN.
+# Tag convention:
+#   v<TALOS_VERSION>       — intermediate base (vmlinuz swapped, used by imager)
+#   installer-v<TALOS_VERSION> — final installer (imager output, used by talosctl upgrade)
+INSTALLER_IMAGE="${REGISTRY}/talos-rk3588-npu-installer-base:installer-v${TALOS_VERSION#v}"
 INSTALLER_BASE_IMAGE="${REGISTRY}/talos-rk3588-npu-installer-base:v${TALOS_VERSION#v}"
 
 log() { echo "[build-installer] $*"; }
