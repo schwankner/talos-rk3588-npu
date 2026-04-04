@@ -196,7 +196,7 @@ mkdir -p "${INSTALLER_OUT}"
     --system-extension-image "ghcr.io/${REGISTRY#ghcr.io/}/rockchip-rknn-libs:${RKNN_RUNTIME_VERSION}-${KERNEL_VERSION}" \
     2>&1
 
-log "Loading and pushing installer to ${INSTALLER_IMAGE}..."
+log "Loading installer image..."
 # Capture the image name from docker/podman load output ("Loaded image: <ref>")
 LOAD_OUTPUT=$("${CONTAINER_RUNTIME}" load -i "${INSTALLER_OUT}/installer-arm64.tar" 2>&1)
 echo "${LOAD_OUTPUT}"
@@ -206,8 +206,18 @@ if [ -z "${LOADED_IMAGE}" ]; then
     exit 1
 fi
 log "Loaded image: ${LOADED_IMAGE}"
-"${CONTAINER_RUNTIME}" tag "${LOADED_IMAGE}" "${INSTALLER_IMAGE}"
-"${CONTAINER_RUNTIME}" push "${INSTALLER_IMAGE}"
+
+log "Pushing installer to ${INSTALLER_IMAGE}..."
+if [ "${CONTAINER_RUNTIME}" = "docker" ]; then
+    # Use buildx imagetools which shares the authenticated buildx builder credentials
+    docker buildx imagetools create \
+        --builder "${BUILDER_NAME}" \
+        --tag "${INSTALLER_IMAGE}" \
+        "${LOADED_IMAGE}"
+else
+    podman tag "${LOADED_IMAGE}" "${INSTALLER_IMAGE}"
+    podman push "${INSTALLER_IMAGE}"
+fi
 
 log "Done! Installer pushed: ${INSTALLER_IMAGE}"
 log ""
