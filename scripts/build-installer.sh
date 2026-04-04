@@ -209,11 +209,19 @@ log "Loaded image: ${LOADED_IMAGE}"
 
 log "Pushing installer to ${INSTALLER_IMAGE}..."
 if [ "${CONTAINER_RUNTIME}" = "docker" ]; then
-    # Use buildx imagetools which shares the authenticated buildx builder credentials
-    docker buildx imagetools create \
+    # Build a trivial wrapper Dockerfile that FROMs the loaded image.
+    # This uses docker buildx build --push which handles GHCR package creation correctly.
+    INSTALLER_RETAG_CTX="${PKGS_WORK_DIR}/installer-retag-ctx"
+    mkdir -p "${INSTALLER_RETAG_CTX}"
+    cat > "${INSTALLER_RETAG_CTX}/Dockerfile" <<DOCKERFILE
+FROM ${LOADED_IMAGE}
+DOCKERFILE
+    docker buildx build \
         --builder "${BUILDER_NAME}" \
+        --platform linux/arm64 \
         --tag "${INSTALLER_IMAGE}" \
-        "${LOADED_IMAGE}"
+        --push \
+        "${INSTALLER_RETAG_CTX}"
 else
     podman tag "${LOADED_IMAGE}" "${INSTALLER_IMAGE}"
     podman push "${INSTALLER_IMAGE}"
