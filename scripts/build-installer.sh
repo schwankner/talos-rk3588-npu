@@ -197,13 +197,12 @@ mkdir -p "${INSTALLER_OUT}"
     2>&1
 
 log "Loading and pushing installer to ${INSTALLER_IMAGE}..."
-"${CONTAINER_RUNTIME}" load -i "${INSTALLER_OUT}/installer-arm64.tar"
-# The imager tags the loaded image — find and retag it
-LOADED_IMAGE=$("${CONTAINER_RUNTIME}" images --format '{{.Repository}}:{{.Tag}}' \
-    | grep -E "siderolabs/installer|siderolabs/talos" | head -1)
+# Capture the image name from docker/podman load output ("Loaded image: <ref>")
+LOAD_OUTPUT=$("${CONTAINER_RUNTIME}" load -i "${INSTALLER_OUT}/installer-arm64.tar" 2>&1)
+echo "${LOAD_OUTPUT}"
+LOADED_IMAGE=$(echo "${LOAD_OUTPUT}" | grep -oE 'Loaded image[^:]*: \S+' | awk '{print $NF}' | head -1)
 if [ -z "${LOADED_IMAGE}" ]; then
-    echo "ERROR: Could not find loaded installer image" >&2
-    "${CONTAINER_RUNTIME}" images >&2
+    echo "ERROR: Could not determine loaded image name from: ${LOAD_OUTPUT}" >&2
     exit 1
 fi
 log "Loaded image: ${LOADED_IMAGE}"
