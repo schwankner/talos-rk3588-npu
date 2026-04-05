@@ -212,6 +212,11 @@ mkdir -p "${UKI_EXT_OUT}"
     --arch arm64 \
     --system-extension-image "ghcr.io/${REGISTRY#ghcr.io/}/rockchip-rknpu:${RKNPU_VERSION}-${KERNEL_VERSION}" \
     --system-extension-image "ghcr.io/${REGISTRY#ghcr.io/}/rockchip-rknn-libs:${RKNN_RUNTIME_VERSION}-${KERNEL_VERSION}" \
+    --extra-kernel-arg cma=128MB \
+    --extra-kernel-arg console=ttyS9,115200 \
+    --extra-kernel-arg console=ttyS2,115200 \
+    --extra-kernel-arg sysctl.kernel.kexec_load_disabled=1 \
+    --extra-kernel-arg talos.dashboard.disabled=1 \
     --extra-kernel-arg vlan=end0.60:end0 \
     --extra-kernel-arg "ip=10.0.60.4::10.0.60.254:255.255.255.0::end0.60:off" \
     --extra-kernel-arg talos.config=http://10.0.60.1:9090/worker.yaml \
