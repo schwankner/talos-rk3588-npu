@@ -63,7 +63,11 @@ setup_pkgs_tree() {
     if [ -n "${PKGS_WORK_DIR}" ]; then
         return
     fi
-    PKGS_WORK_DIR="$(mktemp -d)"
+    # Use /private/tmp so docker volume mounts work with colima — colima only
+    # mounts /private/tmp via virtiofs (rw), not the macOS /var/folders path
+    # that mktemp -d uses by default.
+    PKGS_WORK_DIR="/private/tmp/talos-build-work-$$"
+    mkdir -p "${PKGS_WORK_DIR}"
     # shellcheck disable=SC2064
     trap 'rm -rf "${PKGS_WORK_DIR}"' EXIT
 
