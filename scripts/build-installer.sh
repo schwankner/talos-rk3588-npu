@@ -1,27 +1,27 @@
 #!/usr/bin/env bash
 # Build a custom Talos installer image for RK3588 NPU.
 #
-# Problem: Talos enforces CONFIG_MODULE_SIG_FORCE=y — all kernel modules must be
-# signed with the key that was used to build the running kernel.  The signing
-# key generated during our bldr rebuild does NOT match the key embedded in the
-# officially distributed siderolabs kernel binary.
+# The sbc-rockchip overlay installer (v0.2.0) intercepts --system-extension-image
+# flags and does NOT embed the extension squashfs files inside the UKI initramfs
+# (Bug 14).  We work around this with a two-pass build:
 #
-# Root cause: the Talos imager (ghcr.io/siderolabs/imager) has the siderolabs
-# kernel binary embedded at /usr/install/arm64/vmlinuz inside the imager image
-# itself.  The --base-installer-image flag only controls the installer binary
-# (grub, installer script) — the imager ignores any vmlinuz placed in the
-# base installer image.
+#   Pass 1 (no overlay, with extensions):
+#     The standard Talos imager code path embeds extension squashfs files inside
+#     the UKI initramfs.  This produces a vmlinuz.efi with the correct extensions.
 #
-# Solution:
-#   1. Export the kernel binary from our bldr build (same PKGS_COMMIT → same
-#      signing key that was used to sign rknpu.ko).
-#   2. Create a custom imager image that replaces the siderolabs vmlinuz with
-#      ours (FROM siderolabs/imager + COPY our vmlinuz).
-#   3. Build the final installer via our custom imager WITHOUT sbc-rockchip
-#      overlay.  The no-overlay installer does not repartition the eMMC on
-#      upgrade (Bug 13), so STATE is preserved and the node rejoins the cluster.
-#      Existing U-Boot and DTBs remain on the eMMC from the last board-support
-#      install; a DTB overlay in the rknpu extension will add the NPU DT nodes.
+#   Pass 2 (with overlay, no extensions):
+#     The sbc-rockchip overlay installer writes U-Boot, DTBs, and configures GRUB
+#     for the turingrk1 board layout.  Without this, talosctl upgrade writes the
+#     kernel to the wrong EFI partition path and the node hangs at GRUB.
+#
+#   Combine:
+#     Take the board-support artifacts from Pass 2 (GRUB, U-Boot, DTBs) and
+#     replace its bare vmlinuz.efi with the extension-bearing one from Pass 1.
+#
+# No custom kernel is required.  The module signing key in rknpu.ko is the same
+# as the key baked into the siderolabs kernel binary: both are built from the
+# same siderolabs/pkgs commit (a92bed5), where certs/signing_key.pem is
+# committed to the repository (not generated at build time).
 #
 # Usage:
 #   REGISTRY=ghcr.io/schwankner ./scripts/build-installer.sh
@@ -35,15 +35,19 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=scripts/common.sh
 source "${SCRIPT_DIR}/common.sh"
 
-REPO_ROOT="$(dirname "${SCRIPT_DIR}")"
 REGISTRY="${REGISTRY:-ghcr.io/schwankner}"
-BUILD_ARG_TAG="${BUILD_ARG_TAG:-${KERNEL_VERSION}}"
-CACHE_REGISTRY="${CACHE_REGISTRY:-${REGISTRY}/build-cache}"
 CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-podman}"
 
 # The final installer image reuses the existing installer-base package to avoid
 # GHCR org-level restrictions on creating brand-new packages.
 INSTALLER_IMAGE="${REGISTRY}/talos-rk3588-npu-installer-base:installer-v${TALOS_VERSION#v}"
+
+# Use /private/tmp so docker volume mounts work with colima — colima only
+# mounts /private/tmp via virtiofs (rw), not the macOS /var/folders path
+# that mktemp -d uses by default.
+WORK_DIR="/private/tmp/talos-build-work-$$"
+mkdir -p "${WORK_DIR}"
+trap 'rm -rf "${WORK_DIR}"' EXIT
 
 log() { echo "[build-installer] $*"; }
 
@@ -55,170 +59,26 @@ require_cmd() {
 }
 
 require_cmd "${CONTAINER_RUNTIME}"
-require_cmd curl
+
+IMAGER_REF="ghcr.io/siderolabs/imager:v${TALOS_VERSION#v}"
 
 # ---------------------------------------------------------------------------
-# Shared pkgs tree (same as build-extensions.sh)
-# ---------------------------------------------------------------------------
-
-PKGS_WORK_DIR=""
-
-setup_pkgs_tree() {
-    if [ -n "${PKGS_WORK_DIR}" ]; then
-        return
-    fi
-    # Use /private/tmp so docker volume mounts work with colima — colima only
-    # mounts /private/tmp via virtiofs (rw), not the macOS /var/folders path
-    # that mktemp -d uses by default.
-    PKGS_WORK_DIR="/private/tmp/talos-build-work-$$"
-    mkdir -p "${PKGS_WORK_DIR}"
-    # shellcheck disable=SC2064
-    trap 'rm -rf "${PKGS_WORK_DIR}"' EXIT
-
-    log "Downloading siderolabs/pkgs @ ${PKGS_COMMIT}..."
-    curl -fsSL \
-        "https://github.com/siderolabs/pkgs/archive/${PKGS_COMMIT}.tar.gz" \
-        -o "${PKGS_WORK_DIR}/pkgs.tar.gz"
-    mkdir -p "${PKGS_WORK_DIR}/pkgs"
-    tar -xzf "${PKGS_WORK_DIR}/pkgs.tar.gz" \
-        --strip-components=1 \
-        -C "${PKGS_WORK_DIR}/pkgs"
-
-    # Inject our extensions so bldr can resolve all stages in one tree
-    cp -r "${REPO_ROOT}/rockchip-rknpu"     "${PKGS_WORK_DIR}/pkgs/rockchip-rknpu"
-    cp -r "${REPO_ROOT}/rockchip-rknn-libs" "${PKGS_WORK_DIR}/pkgs/rockchip-rknn-libs"
-}
-
-# ---------------------------------------------------------------------------
-# buildx builder setup (docker only; podman uses native buildah backend)
-# ---------------------------------------------------------------------------
-
-BUILDER_NAME="talos-rk3588-builder"
-if [ "${CONTAINER_RUNTIME}" = "docker" ]; then
-    if ! docker buildx inspect "${BUILDER_NAME}" >/dev/null 2>&1; then
-        log "Creating buildx builder ${BUILDER_NAME}..."
-        docker buildx create --name "${BUILDER_NAME}" --driver docker-container --use
-    else
-        docker buildx use "${BUILDER_NAME}"
-    fi
-    BUILDX_CMD="docker buildx build --builder ${BUILDER_NAME}"
-else
-    BUILDX_CMD="podman build"
-fi
-
-# ---------------------------------------------------------------------------
-# Step 1: Export the kernel binary from our pkgs build
-# ---------------------------------------------------------------------------
-
-log "Exporting kernel binary from pkgs @ ${PKGS_COMMIT}..."
-setup_pkgs_tree
-
-KERNEL_OUT="${PKGS_WORK_DIR}/kernel-out"
-mkdir -p "${KERNEL_OUT}"
-
-# shellcheck disable=SC2086
-${BUILDX_CMD} \
-    --file "${PKGS_WORK_DIR}/pkgs/Pkgfile" \
-    --target kernel \
-    --platform linux/arm64 \
-    --build-arg TAG="${BUILD_ARG_TAG}" \
-    --build-arg PKGS="${PKGS_COMMIT}" \
-    --cache-from "type=registry,ref=${CACHE_REGISTRY}/rockchip-rknpu" \
-    --output "type=local,dest=${KERNEL_OUT}" \
-    "${PKGS_WORK_DIR}/pkgs"
-
-log "Kernel output:"
-find "${KERNEL_OUT}" -type f | sort
-
-# Locate vmlinuz (look in common paths)
-VMLINUZ=""
-for candidate in \
-    "${KERNEL_OUT}/usr/install/arm64/vmlinuz" \
-    "${KERNEL_OUT}/boot/vmlinuz" \
-    "${KERNEL_OUT}/boot/vmlinuz-arm64"; do
-    if [ -f "${candidate}" ]; then
-        VMLINUZ="${candidate}"
-        break
-    fi
-done
-
-if [ -z "${VMLINUZ}" ]; then
-    echo "ERROR: Could not find vmlinuz in kernel output. Files found:" >&2
-    find "${KERNEL_OUT}" -type f >&2
-    exit 1
-fi
-log "Using vmlinuz: ${VMLINUZ}"
-
-# ---------------------------------------------------------------------------
-# Step 2: Build custom imager (replace siderolabs vmlinuz → ours)
+# Pass 1: Build UKI with extensions embedded (no overlay)
 #
-# The siderolabs imager image has the kernel at /usr/install/arm64/vmlinuz.
-# The --base-installer-image flag does NOT affect which kernel is used for
-# the UKI build — the imager always uses its own embedded vmlinuz.
-# We must therefore replace the vmlinuz INSIDE the imager image.
+# The standard imager path embeds all --system-extension-image squashfs files
+# and the schematic inside the UKI initramfs CPIO.  The sbc-rockchip overlay
+# intercepts these flags and discards them (Bug 14), so we must run without
+# --overlay-image to get the correct initramfs.
 # ---------------------------------------------------------------------------
 
-log "Building custom imager with our kernel (replaces siderolabs vmlinuz)..."
+log "Pass 1: building UKI with extensions (no overlay)..."
 
-CUSTOM_IMAGER_CTX="${PKGS_WORK_DIR}/custom-imager-ctx"
-mkdir -p "${CUSTOM_IMAGER_CTX}"
-cp "${VMLINUZ}" "${CUSTOM_IMAGER_CTX}/vmlinuz"
-
-cat > "${CUSTOM_IMAGER_CTX}/Dockerfile" <<DOCKERFILE
-FROM ghcr.io/siderolabs/imager:v${TALOS_VERSION#v}
-
-# Replace the siderolabs kernel (which has siderolabs' ephemeral signing key)
-# with our own kernel built from the same PKGS_COMMIT source.
-# The imager reads /usr/install/arm64/vmlinuz to build the UKI — this is the
-# correct location, NOT the --base-installer-image.
-COPY vmlinuz /usr/install/arm64/vmlinuz
-DOCKERFILE
-
-if [ "${CONTAINER_RUNTIME}" = "docker" ]; then
-    # Build locally (no push needed — we run the imager immediately)
-    docker buildx build \
-        --builder "${BUILDER_NAME}" \
-        --platform linux/arm64 \
-        --tag "custom-imager:${TALOS_VERSION#v}" \
-        --load \
-        "${CUSTOM_IMAGER_CTX}"
-    CUSTOM_IMAGER_REF="custom-imager:${TALOS_VERSION#v}"
-else
-    podman build \
-        --platform linux/arm64 \
-        --tag "custom-imager:${TALOS_VERSION#v}" \
-        "${CUSTOM_IMAGER_CTX}"
-    CUSTOM_IMAGER_REF="custom-imager:${TALOS_VERSION#v}"
-fi
-
-log "Custom imager ready: ${CUSTOM_IMAGER_REF}"
-
-# ---------------------------------------------------------------------------
-# Step 3: Build UKI with extensions embedded (NO overlay)
-#
-# Running the imager WITHOUT --overlay-image causes the standard Talos code
-# path, which embeds the extension squashfs (and schematic) inside the UKI
-# initramfs.  This is the correct and complete installer — we do not need the
-# sbc-rockchip overlay because:
-#
-#   a) The existing U-Boot and board DTBs are already on the eMMC from the
-#      initial Talos installation with the turingrk1 overlay.  talosctl upgrade
-#      does not touch the bootloader partition when there is no overlay installer.
-#   b) Without an overlay installer, talosctl upgrade does NOT repartition the
-#      eMMC (Bug 13), so the STATE partition (machine config, cluster secrets)
-#      is preserved across upgrades.
-#   c) NPU device-tree nodes will be added via a DTB overlay in the rknpu
-#      extension rather than relying on the sbc-rockchip rknn.patch (Bug 7).
-# ---------------------------------------------------------------------------
-
-log "Building UKI installer with extensions (no overlay)..."
-
-INSTALLER_OUT="${PKGS_WORK_DIR}/installer-out"
-mkdir -p "${INSTALLER_OUT}"
+UKI_EXT_OUT="${WORK_DIR}/uki-ext-out"
+mkdir -p "${UKI_EXT_OUT}"
 
 "${CONTAINER_RUNTIME}" run --rm \
-    -v "${INSTALLER_OUT}:/out" \
-    "${CUSTOM_IMAGER_REF}" \
+    -v "${UKI_EXT_OUT}:/out" \
+    "${IMAGER_REF}" \
     installer \
     --arch arm64 \
     --system-extension-image "ghcr.io/${REGISTRY#ghcr.io/}/rockchip-rknpu:${RKNPU_VERSION}-${KERNEL_VERSION}" \
@@ -230,26 +90,110 @@ mkdir -p "${INSTALLER_OUT}"
     --extra-kernel-arg talos.dashboard.disabled=1 \
     2>&1
 
-log "Loading installer image..."
-INSTALLER_LOAD=$("${CONTAINER_RUNTIME}" load -i "${INSTALLER_OUT}/installer-arm64.tar" 2>&1)
-echo "${INSTALLER_LOAD}"
-INSTALLER_LOCAL_IMAGE=$(echo "${INSTALLER_LOAD}" | grep -oE 'Loaded image[^:]*: \S+' | awk '{print $NF}' | head -1)
-if [ -z "${INSTALLER_LOCAL_IMAGE}" ]; then
-    echo "ERROR: Could not determine loaded image name from: ${INSTALLER_LOAD}" >&2
+log "Loading Pass 1 installer image..."
+UKI_EXT_LOAD=$("${CONTAINER_RUNTIME}" load -i "${UKI_EXT_OUT}/installer-arm64.tar" 2>&1)
+echo "${UKI_EXT_LOAD}"
+UKI_EXT_IMAGE=$(echo "${UKI_EXT_LOAD}" | grep -oE 'Loaded image[^:]*: \S+' | awk '{print $NF}' | head -1)
+if [ -z "${UKI_EXT_IMAGE}" ]; then
+    echo "ERROR: Could not determine loaded image name from: ${UKI_EXT_LOAD}" >&2
     exit 1
 fi
-INSTALLER_LOCAL_REF="npu-installer:${TALOS_VERSION#v}"
-"${CONTAINER_RUNTIME}" tag "${INSTALLER_LOCAL_IMAGE}" "${INSTALLER_LOCAL_REF}"
-log "Installer tagged: ${INSTALLER_LOCAL_REF}"
+UKI_EXT_REF="uki-ext-installer:${TALOS_VERSION#v}"
+"${CONTAINER_RUNTIME}" tag "${UKI_EXT_IMAGE}" "${UKI_EXT_REF}"
+log "Pass 1 installer tagged: ${UKI_EXT_REF}"
+
+# ---------------------------------------------------------------------------
+# Pass 2: Build overlay installer (no extensions)
+#
+# Produces the board-support artifacts (U-Boot, DTBs, GRUB config) that the
+# turingrk1 board requires.  The vmlinuz.efi produced here has no extensions
+# in its initramfs; it will be replaced with the Pass 1 UKI in the next step.
+# ---------------------------------------------------------------------------
+
+log "Pass 2: building overlay installer (no extensions)..."
+
+OVERLAY_OUT="${WORK_DIR}/overlay-out"
+mkdir -p "${OVERLAY_OUT}"
+
+"${CONTAINER_RUNTIME}" run --rm \
+    -v "${OVERLAY_OUT}:/out" \
+    "${IMAGER_REF}" \
+    installer \
+    --arch arm64 \
+    --overlay-image ghcr.io/siderolabs/sbc-rockchip:v0.2.0 \
+    --overlay-name turingrk1 \
+    2>&1
+
+log "Loading Pass 2 installer image..."
+OVERLAY_LOAD=$("${CONTAINER_RUNTIME}" load -i "${OVERLAY_OUT}/installer-arm64.tar" 2>&1)
+echo "${OVERLAY_LOAD}"
+OVERLAY_IMAGE=$(echo "${OVERLAY_LOAD}" | grep -oE 'Loaded image[^:]*: \S+' | awk '{print $NF}' | head -1)
+if [ -z "${OVERLAY_IMAGE}" ]; then
+    echo "ERROR: Could not determine loaded image name from: ${OVERLAY_LOAD}" >&2
+    exit 1
+fi
+OVERLAY_REF="overlay-installer:${TALOS_VERSION#v}"
+"${CONTAINER_RUNTIME}" tag "${OVERLAY_IMAGE}" "${OVERLAY_REF}"
+log "Pass 2 overlay installer tagged: ${OVERLAY_REF}"
+
+# ---------------------------------------------------------------------------
+# Combine: overlay installer base + extension-bearing UKI
+#
+# Extract vmlinuz.efi from Pass 1 (extensions embedded in initramfs CPIO) and
+# replace the bare vmlinuz.efi in the Pass 2 image with it.
+# ---------------------------------------------------------------------------
+
+log "Combining: replacing vmlinuz.efi in overlay installer with extension-bearing UKI..."
+
+COMBINED_CTX="${WORK_DIR}/combined-ctx"
+mkdir -p "${COMBINED_CTX}"
+
+# Extract vmlinuz.efi by creating a temporary container.
+# chmod 644: the in-container file mode is 0400 (Talos installer images); the
+# subsequent docker cp into the patch container would fail with "permission denied".
+EXTRACT_CID=$("${CONTAINER_RUNTIME}" create "${UKI_EXT_REF}")
+"${CONTAINER_RUNTIME}" cp "${EXTRACT_CID}:/usr/install/arm64/vmlinuz.efi" "${COMBINED_CTX}/vmlinuz.efi"
+"${CONTAINER_RUNTIME}" rm "${EXTRACT_CID}"
+chmod 644 "${COMBINED_CTX}/vmlinuz.efi"
+log "Extracted vmlinuz.efi ($(du -sh "${COMBINED_CTX}/vmlinuz.efi" | cut -f1)) from ${UKI_EXT_REF}"
+
+COMBINED_REF="combined-installer:${TALOS_VERSION#v}"
+if [ "${CONTAINER_RUNTIME}" = "docker" ]; then
+    # docker buildx uses an isolated image store (docker-container driver) and
+    # cannot see images loaded into the Docker daemon via `docker load`.  Use
+    # `docker commit` against the daemon directly so no registry round-trip is
+    # needed and no buildx image-store isolation issue arises.
+    PATCH_CID=$(docker create "${OVERLAY_REF}")
+    docker cp "${COMBINED_CTX}/vmlinuz.efi" "${PATCH_CID}:/usr/install/arm64/vmlinuz.efi"
+    docker commit "${PATCH_CID}" "${COMBINED_REF}"
+    docker rm "${PATCH_CID}"
+else
+    cat > "${COMBINED_CTX}/Dockerfile" <<DOCKERFILE
+FROM ${OVERLAY_REF}
+# Replace the bare overlay-installer UKI (no extensions in initramfs) with the
+# one built in Pass 1 (standard imager path, extensions embedded as squashfs).
+COPY vmlinuz.efi /usr/install/arm64/vmlinuz.efi
+DOCKERFILE
+    podman build \
+        --platform linux/arm64 \
+        --tag "${COMBINED_REF}" \
+        "${COMBINED_CTX}"
+fi
+log "Combined installer built: ${COMBINED_REF}"
 
 log "Pushing installer to ${INSTALLER_IMAGE}..."
 # Tag and push to an EXISTING package (installer-base) with a new tag — this
 # avoids GHCR org-level restrictions that block creating new packages via
 # GITHUB_TOKEN.
-"${CONTAINER_RUNTIME}" tag "${INSTALLER_LOCAL_REF}" "${INSTALLER_IMAGE}"
+"${CONTAINER_RUNTIME}" tag "${COMBINED_REF}" "${INSTALLER_IMAGE}"
 "${CONTAINER_RUNTIME}" push "${INSTALLER_IMAGE}"
 
 log "Done! Installer pushed: ${INSTALLER_IMAGE}"
 log ""
 log "Upgrade node with:"
 log "  talosctl upgrade --nodes <IP> --image ${INSTALLER_IMAGE} --preserve"
+log ""
+log "Note: The sbc-rockchip overlay installer repartitions the eMMC (Bug 13),"
+log "wiping STATE. After upgrade, the node enters maintenance mode and gets"
+log "a DHCP address on the management network (10.0.70.x). Apply the machine"
+log "config with: talosctl apply-config --insecure --nodes <10.0.70.x> -f worker2.yaml"
