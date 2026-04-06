@@ -15,7 +15,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/common.sh"
 
 REPO_ROOT="$(dirname "${SCRIPT_DIR}")"
-REGISTRY="${REGISTRY:-ghcr.io/mrmoor}"
+REGISTRY="${REGISTRY:-ghcr.io/schwankner}"
 BUILD_ARG_TAG="${BUILD_ARG_TAG:-${KERNEL_VERSION}}"
 CACHE_REGISTRY="${CACHE_REGISTRY:-${REGISTRY}/build-cache}"
 
