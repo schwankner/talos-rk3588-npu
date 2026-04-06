@@ -157,6 +157,128 @@ EXTRACT_CID=$("${CONTAINER_RUNTIME}" create "${UKI_EXT_REF}")
 chmod 644 "${COMBINED_CTX}/vmlinuz.efi"
 log "Extracted vmlinuz.efi ($(du -sh "${COMBINED_CTX}/vmlinuz.efi" | cut -f1)) from ${UKI_EXT_REF}"
 
+# ---------------------------------------------------------------------------
+# DTB patch: replace per-core rknn-core nodes with vendor rknpu node
+#
+# The sbc-rockchip DTB ships with three per-core nodes
+# (compatible = "rockchip,rk3588-rknn-core") for the mainline rocket driver.
+# The vendor w568w/rknpu-module driver expects a single unified node
+# (compatible = "rockchip,rk3588-rknpu") covering all three cores.  We patch
+# the DTB in the installer so the correct node is on disk after talosctl upgrade.
+#
+# Phandle values are numeric (the DTB has no __symbols__); they are derived
+# from the sbc-rockchip v0.2.0 rk3588-turing-rk1.dtb and must be re-verified
+# if the sbc-rockchip version is updated.
+# ---------------------------------------------------------------------------
+
+log "Extracting rk3588-turing-rk1.dtb from overlay installer..."
+DTB_EXTRACT_CID=$("${CONTAINER_RUNTIME}" create "${OVERLAY_REF}")
+"${CONTAINER_RUNTIME}" cp \
+    "${DTB_EXTRACT_CID}:/overlay/artifacts/arm64/dtb/rockchip/rk3588-turing-rk1.dtb" \
+    "${COMBINED_CTX}/rk3588-turing-rk1.dtb"
+"${CONTAINER_RUNTIME}" rm "${DTB_EXTRACT_CID}"
+chmod 644 "${COMBINED_CTX}/rk3588-turing-rk1.dtb"
+
+# Write the Python DTS patching script into the build context.
+cat > "${COMBINED_CTX}/patch_dtb.py" << 'PYEOF'
+#!/usr/bin/env python3
+"""
+Patch rk3588-turing-rk1 DTS: replace per-core rknn-core NPU nodes with
+a single vendor rknpu node so the w568w/rknpu-module driver binds.
+
+Phandle values derived from rk3588-turing-rk1.dtb (sbc-rockchip v0.2.0):
+  scmi_clk (prot@14) = 0x0a, NPU SCMI clock ID = 0x06
+  cru phandle = 0x21, core0 srst_a reset ID = 0x110
+  power-controller = 0x22: NPUTOP=0x09, NPU1=0x0a, NPU2=0x0b
+  iommu phandles: fdab9000=0x66, fdac9000=0x67, fdad9000=0x68
+  npu-supply = 0x36 (vdd_npu_s0)
+  interrupts: SPI 0x6e/0x6f/0x70 (110/111/112), level-high (0x04)
+"""
+import sys
+
+NEW_NODE = (
+    '\n'
+    '\trknpu: rknpu@fdab0000 {\n'
+    '\t\tcompatible = "rockchip,rk3588-rknpu", "rockchip,rknpu";\n'
+    '\t\treg = <0x00 0xfdab0000 0x00 0x9000\n'
+    '\t\t       0x00 0xfdac0000 0x00 0x9000\n'
+    '\t\t       0x00 0xfdad0000 0x00 0x9000>;\n'
+    '\t\treg-names = "rknpu_core0", "rknpu_core1", "rknpu_core2";\n'
+    '\t\tinterrupts = <0x00 0x6e 0x04 0x00\n'
+    '\t\t              0x00 0x6f 0x04 0x00\n'
+    '\t\t              0x00 0x70 0x04 0x00>;\n'
+    '\t\tinterrupt-names = "npu_irq0", "npu_irq1", "npu_irq2";\n'
+    '\t\tclocks = <0x0a 0x06>;\n'
+    '\t\tclock-names = "clk_npu";\n'
+    '\t\tassigned-clocks = <0x0a 0x06>;\n'
+    '\t\tassigned-clock-rates = <0xbebc200>;\n'
+    '\t\tresets = <0x21 0x110>;\n'
+    '\t\treset-names = "srst_a";\n'
+    '\t\tpower-domains = <0x22 0x09 0x22 0x0a 0x22 0x0b>;\n'
+    '\t\tpower-domain-names = "nputop", "npu1", "npu2";\n'
+    '\t\tiommus = <0x66 0x67 0x68>;\n'
+    '\t\tnpu-supply = <0x36>;\n'
+    '\t\tsram-supply = <0x36>;\n'
+    '\t\tstatus = "okay";\n'
+    '\t};\n'
+)
+
+
+def process_node(dts, node_name, disable=False, insert_after=None):
+    lines = dts.split('\n')
+    result = []
+    in_node = False
+    depth = 0
+    node_marker = '\t' + node_name + ' {'
+
+    for line in lines:
+        if not in_node:
+            if line.rstrip() == node_marker:
+                in_node = True
+                depth = 1
+                result.append(line)
+            else:
+                result.append(line)
+        else:
+            depth += line.count('{') - line.count('}')
+            if disable and 'status = "okay"' in line:
+                line = line.replace('status = "okay"', 'status = "disabled"')
+            result.append(line)
+            if depth <= 0:
+                in_node = False
+                if insert_after is not None:
+                    result.append(insert_after)
+
+    return '\n'.join(result)
+
+
+if __name__ == '__main__':
+    dts = sys.stdin.read()
+
+    for addr in ['npu@fdab0000', 'npu@fdac0000', 'npu@fdad0000']:
+        dts = process_node(dts, addr, disable=True)
+
+    dts = process_node(dts, 'iommu@fdad9000', insert_after=NEW_NODE)
+
+    sys.stdout.write(dts)
+PYEOF
+
+log "Patching rk3588-turing-rk1.dtb (disabling rknn-core nodes, adding rknpu node)..."
+# Run dtc + python3 inside a container so no host toolchain is required.
+# dtc is architecture-independent: it produces the same binary DTB regardless
+# of the host CPU.  alpine:3.21 is used to avoid 'latest' tag drift.
+"${CONTAINER_RUNTIME}" run --rm \
+    --platform linux/amd64 \
+    -v "${COMBINED_CTX}:/work" \
+    alpine:3.21 \
+    sh -c "apk add --quiet dtc python3 && \
+           dtc -I dtb -O dts /work/rk3588-turing-rk1.dtb 2>/dev/null | \
+           python3 /work/patch_dtb.py | \
+           dtc -W no-unique_unit_address -W no-clocks_property \
+               -W no-cooling_device_property \
+               -I dts -O dtb -o /work/rk3588-turing-rk1-patched.dtb 2>/dev/null"
+log "DTB patched: $(du -sh "${COMBINED_CTX}/rk3588-turing-rk1-patched.dtb" | cut -f1)"
+
 COMBINED_REF="combined-installer:${TALOS_VERSION#v}"
 if [ "${CONTAINER_RUNTIME}" = "docker" ]; then
     # docker buildx uses an isolated image store (docker-container driver) and
@@ -165,6 +287,8 @@ if [ "${CONTAINER_RUNTIME}" = "docker" ]; then
     # needed and no buildx image-store isolation issue arises.
     PATCH_CID=$(docker create "${OVERLAY_REF}")
     docker cp "${COMBINED_CTX}/vmlinuz.efi" "${PATCH_CID}:/usr/install/arm64/vmlinuz.efi"
+    docker cp "${COMBINED_CTX}/rk3588-turing-rk1-patched.dtb" \
+        "${PATCH_CID}:/overlay/artifacts/arm64/dtb/rockchip/rk3588-turing-rk1.dtb"
     docker commit "${PATCH_CID}" "${COMBINED_REF}"
     docker rm "${PATCH_CID}"
 else
@@ -173,6 +297,9 @@ FROM ${OVERLAY_REF}
 # Replace the bare overlay-installer UKI (no extensions in initramfs) with the
 # one built in Pass 1 (standard imager path, extensions embedded as squashfs).
 COPY vmlinuz.efi /usr/install/arm64/vmlinuz.efi
+# Replace the sbc-rockchip DTB with the patched version that has the vendor
+# rknpu node (replaces per-core rknn-core nodes for w568w/rknpu-module).
+COPY rk3588-turing-rk1-patched.dtb /overlay/artifacts/arm64/dtb/rockchip/rk3588-turing-rk1.dtb
 DOCKERFILE
     podman build \
         --platform linux/arm64 \
