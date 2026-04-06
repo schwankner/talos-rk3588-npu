@@ -222,9 +222,19 @@ podman create --platform linux/arm64 ghcr.io/siderolabs/imager:v1.12.6 | xargs p
 FROM ghcr.io/siderolabs/imager:v1.12.6
 COPY vmlinuz /usr/install/arm64/vmlinuz
 ```
-Then run the custom imager (no `--base-installer-image` needed, or use default siderolabs installer-base). See `scripts/build-installer.sh` for the full implementation.
+Where `vmlinuz` comes from our own bldr build of the `kernel` target at `PKGS_COMMIT=a92bed5`.
+See `scripts/build-extensions.sh` (`build_kernel` function) and `scripts/build-installer.sh`.
 
-**Key insight:** The signing key is embedded in the kernel at compile time. Our bldr build at `PKGS_COMMIT=a92bed5` uses the same pre-committed signing key as the siderolabs build (the key in `certs/signing_key.pem` is committed to the pkgs source tree, making the build reproducible). This means our module signing key and the kernel's embedded key are the **same key** — the actual fix needed is ensuring the module is signed with `sha512` (matching `CONFIG_MODULE_SIG_SHA512=y`), not sha256.
+**Key insight:** The module signing key is **ephemeral** — it is generated at kernel build time
+(`CONFIG_MODULE_SIG_KEY=""` in `kernel/build/certs/x509.genkey`) and **not committed** to the
+pkgs source tree. The siderolabs CI generates its own ephemeral key K_SL; our bldr build
+generates K1. `rknpu.ko` is signed with K1 (via `kernel-build` stage → `sign-file`). The
+siderolabs imager's embedded kernel has K_SL in its built-in keyring. K1 ≠ K_SL → "key was
+rejected by service".
+
+The fix is to ensure both the running kernel AND rknpu.ko use the same key (K1) by building the
+kernel with bldr and inserting it into the imager. Both builds share the `kernel-build` bldr
+cache layer, which contains `certs/signing_key.pem` — so they always use the same key.
 
 ---
 
@@ -385,12 +395,12 @@ tpi power on  -n 4 --host 10.0.70.2 --user root --password turing
 talosctl apply-config --insecure --nodes 10.0.70.17 -f worker2.yaml
 ```
 
-**Fix (pending):** Build the NPU installer WITHOUT the sbc-rockchip overlay step (Pass 2 and
-combine step). Without the overlay, `talosctl upgrade` does NOT repartition the eMMC (Bug 13),
-so STATE is preserved, the machine config is applied on boot, and VLAN 60 is configured before
-NTP/DNS is needed. The existing U-Boot+DTBs (already on eMMC from the working Talos install)
-are preserved as-is. The NPU DTB overlay will be added via the `rockchip-rknpu` extension
-rather than relying on the sbc-rockchip rknn.patch (see Bug 7).
+**Fix:** Build a custom imager that embeds our bldr-built kernel instead of the siderolabs
+kernel. Both the running kernel and `rknpu.ko` are then signed with the same key (K1, from the
+shared `kernel-build` bldr cache layer). See Bug 11 for the full explanation.
+
+Implementation in `scripts/build-extensions.sh` (`build_kernel` target) and
+`scripts/build-installer.sh` (custom imager build step before Pass 1).
 
 ---
 

@@ -81,6 +81,38 @@ setup_pkgs_tree() {
 }
 
 # ---------------------------------------------------------------------------
+# kernel — full kernel image for the custom imager
+#
+# rknpu.ko must be signed with the same key embedded in the running kernel.
+# The signing key is ephemeral (generated during kernel-build, never committed).
+# We build our own kernel from pkgs@${PKGS_COMMIT} so that both the kernel and
+# rknpu.ko share the same kernel-build cache layer — and therefore the same key.
+# The custom imager embeds this kernel at /usr/install/arm64/vmlinuz.
+# ---------------------------------------------------------------------------
+
+build_kernel() {
+    log "Building kernel (${KERNEL_VERSION}) for custom imager..."
+    setup_pkgs_tree
+
+    local image="${REGISTRY}/talos-rk3588-kernel:${KERNEL_VERSION}"
+
+    docker buildx build \
+        --builder "${BUILDER_NAME}" \
+        --file "${PKGS_WORK_DIR}/pkgs/Pkgfile" \
+        --target kernel \
+        --platform linux/arm64 \
+        --build-arg TAG="${BUILD_ARG_TAG}" \
+        --build-arg PKGS="${PKGS_COMMIT}" \
+        --cache-from "type=registry,ref=${CACHE_REGISTRY}/kernel" \
+        --cache-to   "type=registry,ref=${CACHE_REGISTRY}/kernel,mode=max" \
+        --tag "${image}" \
+        --push \
+        "${PKGS_WORK_DIR}/pkgs"
+
+    log "Pushed: ${image}"
+}
+
+# ---------------------------------------------------------------------------
 # rockchip-rknpu — kernel module, requires siderolabs/pkgs tree
 # ---------------------------------------------------------------------------
 
@@ -98,6 +130,7 @@ build_rknpu() {
         --platform linux/arm64 \
         --build-arg TAG="${BUILD_ARG_TAG}" \
         --build-arg PKGS="${PKGS_COMMIT}" \
+        --cache-from "type=registry,ref=${CACHE_REGISTRY}/kernel" \
         --cache-from "type=registry,ref=${CACHE_REGISTRY}/rockchip-rknpu" \
         --cache-to   "type=registry,ref=${CACHE_REGISTRY}/rockchip-rknpu,mode=max" \
         --tag "${image}" \
@@ -141,14 +174,16 @@ build_rknn_libs() {
 TARGET="${1:-all}"
 
 case "${TARGET}" in
+    kernel)     build_kernel ;;
     rknpu)      build_rknpu ;;
     rknn-libs)  build_rknn_libs ;;
     all)
+        build_kernel
         build_rknpu
         build_rknn_libs
         ;;
     *)
-        echo "Usage: $0 [rknpu|rknn-libs|all]" >&2
+        echo "Usage: $0 [kernel|rknpu|rknn-libs|all]" >&2
         exit 1
         ;;
 esac
