@@ -297,4 +297,47 @@ The combined installer has both extension squashfs files embedded in the UKI ini
 
 ---
 
+## Bug 15: Baking `vlan=` / static `ip=` into installer kernel args breaks maintenance mode
+
+**Symptom:** Node boots into Talos maintenance mode but is unreachable — machined logs only
+`"waiting for network to be ready"` forever. 10.0.60.4 never responds to ping. The UART shows
+`"network is unreachable"` for 8.8.8.8 every second with no progress.
+
+**Root cause:** `build-installer.sh` was writing `--extra-kernel-arg vlan=end0.60:end0` and
+`--extra-kernel-arg "ip=10.0.60.4::10.0.60.254:255.255.255.0::end0.60:off"` into the grub.cfg
+baked into the installer image. When the node lands in maintenance mode (no STATE partition),
+machined cannot configure the VLAN because:
+1. The Turing Pi 2's internal switch does not pass VLAN 60 tagged frames on node ports until the
+   machine config (VLANSpec) is applied by machined — a chicken-and-egg problem.
+2. machined needs to receive the machine config first (via maintenance API or talos.config URL)
+   to know about VLAN 60, but without VLAN 60 it cannot reach the talos.config server on
+   10.0.60.x.
+
+Additionally, `ip=dhcp` (via `CONFIG_IP_PNP_DHCP`) triggers kernel-level DHCP which hangs for
+300–350 s on RK3588 due to `sync_state() pending due to fe1c0000.ethernet` (PM domain not ready
+at early boot), blocking machined from starting during that window.
+
+**Solution:**
+1. Remove all `vlan=`, `ip=`, and `talos.config=` args from both imager passes in
+   `build-installer.sh`. Network config belongs in the machine config, not the installer.
+2. To re-provision a node stuck in maintenance mode, flash a clean Talos metal image and apply
+   the machine config via talosctl:
+   ```bash
+   # Flash standard metal image (gets DHCP on management VLAN 10.0.70.x)
+   tpi flash -n 4 --image-path talos-turing-rk1-v1.12.6.raw --host 10.0.70.2 --user root --password turing
+   # Power cycle
+   tpi power off -n 4 --host 10.0.70.2 --user root --password turing
+   tpi power on  -n 4 --host 10.0.70.2 --user root --password turing
+   # Wait for maintenance mode (~20s), find IP from UART, then:
+   talosctl apply-config --insecure --nodes 10.0.70.17 -f worker.yaml
+   ```
+3. The management DHCP (10.0.70.x) works with the standard metal image because the standard
+   grub.cfg has no VLAN args — machined does DHCP on the bare end0 interface. After the machine
+   config is applied, machined configures VLAN 60 and the switch starts passing tagged frames.
+
+**Key insight:** Installer kernel args persist in grub.cfg after install. Any arg that interferes
+with maintenance mode DHCP will make the node unrecoverable without physical intervention.
+
+---
+
 *Add new bugs above this line, most recent first.*

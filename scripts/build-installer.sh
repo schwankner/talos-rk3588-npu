@@ -217,9 +217,6 @@ mkdir -p "${UKI_EXT_OUT}"
     --extra-kernel-arg console=ttyS2,115200 \
     --extra-kernel-arg sysctl.kernel.kexec_load_disabled=1 \
     --extra-kernel-arg talos.dashboard.disabled=1 \
-    --extra-kernel-arg vlan=end0.60:end0 \
-    --extra-kernel-arg "ip=10.0.60.4::10.0.60.254:255.255.255.0::end0.60:off" \
-    --extra-kernel-arg talos.config=http://10.0.60.1:9090/worker.yaml \
     2>&1
 
 log "Loading UKI-with-extensions installer image..."
@@ -254,9 +251,6 @@ mkdir -p "${OVERLAY_OUT}"
     --arch arm64 \
     --overlay-image ghcr.io/siderolabs/sbc-rockchip:v0.2.0 \
     --overlay-name turingrk1 \
-    --extra-kernel-arg vlan=end0.60:end0 \
-    --extra-kernel-arg "ip=10.0.60.4::10.0.60.254:255.255.255.0::end0.60:off" \
-    --extra-kernel-arg talos.config=http://10.0.60.1:9090/worker.yaml \
     2>&1
 
 log "Loading overlay installer image..."
