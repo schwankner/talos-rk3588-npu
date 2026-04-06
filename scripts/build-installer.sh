@@ -17,7 +17,11 @@
 #      signing key that was used to sign rknpu.ko).
 #   2. Create a custom imager image that replaces the siderolabs vmlinuz with
 #      ours (FROM siderolabs/imager + COPY our vmlinuz).
-#   3. Build the final installer via our custom imager.
+#   3. Build the final installer via our custom imager WITHOUT sbc-rockchip
+#      overlay.  The no-overlay installer does not repartition the eMMC on
+#      upgrade (Bug 13), so STATE is preserved and the node rejoins the cluster.
+#      Existing U-Boot and DTBs remain on the eMMC from the last board-support
+#      install; a DTB overlay in the rknpu extension will add the NPU DT nodes.
 #
 # Usage:
 #   REGISTRY=ghcr.io/schwankner ./scripts/build-installer.sh
@@ -190,27 +194,30 @@ fi
 log "Custom imager ready: ${CUSTOM_IMAGER_REF}"
 
 # ---------------------------------------------------------------------------
-# Step 3a: Build UKI with extensions embedded (NO overlay)
+# Step 3: Build UKI with extensions embedded (NO overlay)
 #
-# The sbc-rockchip overlay installer v0.2.0 intercepts --system-extension-image
-# flags: it lists them under overlayInstaller.imageRefs in the profile but does
-# NOT embed the extension squashfs files inside the UKI initramfs CPIO.  Running
-# the imager WITHOUT --overlay-image causes the standard Talos code path, which
-# DOES embed the extension squashfs (and schematic) inside the UKI initramfs.
+# Running the imager WITHOUT --overlay-image causes the standard Talos code
+# path, which embeds the extension squashfs (and schematic) inside the UKI
+# initramfs.  This is the correct and complete installer — we do not need the
+# sbc-rockchip overlay because:
 #
-# We therefore run the imager twice:
-#   3a  no overlay, with extensions  → correct UKI (extensions in initramfs)
-#   3b  with overlay, no extensions  → board support files (U-Boot, DTBs)
-# Then we replace the bare UKI from 3b with the extension-bearing one from 3a.
+#   a) The existing U-Boot and board DTBs are already on the eMMC from the
+#      initial Talos installation with the turingrk1 overlay.  talosctl upgrade
+#      does not touch the bootloader partition when there is no overlay installer.
+#   b) Without an overlay installer, talosctl upgrade does NOT repartition the
+#      eMMC (Bug 13), so the STATE partition (machine config, cluster secrets)
+#      is preserved across upgrades.
+#   c) NPU device-tree nodes will be added via a DTB overlay in the rknpu
+#      extension rather than relying on the sbc-rockchip rknn.patch (Bug 7).
 # ---------------------------------------------------------------------------
 
-log "Pass 1: building UKI with extensions (no overlay)..."
+log "Building UKI installer with extensions (no overlay)..."
 
-UKI_EXT_OUT="${PKGS_WORK_DIR}/uki-ext-out"
-mkdir -p "${UKI_EXT_OUT}"
+INSTALLER_OUT="${PKGS_WORK_DIR}/installer-out"
+mkdir -p "${INSTALLER_OUT}"
 
 "${CONTAINER_RUNTIME}" run --rm \
-    -v "${UKI_EXT_OUT}:/out" \
+    -v "${INSTALLER_OUT}:/out" \
     "${CUSTOM_IMAGER_REF}" \
     installer \
     --arch arm64 \
@@ -223,105 +230,23 @@ mkdir -p "${UKI_EXT_OUT}"
     --extra-kernel-arg talos.dashboard.disabled=1 \
     2>&1
 
-log "Loading UKI-with-extensions installer image..."
-UKI_EXT_LOAD=$("${CONTAINER_RUNTIME}" load -i "${UKI_EXT_OUT}/installer-arm64.tar" 2>&1)
-echo "${UKI_EXT_LOAD}"
-UKI_EXT_IMAGE=$(echo "${UKI_EXT_LOAD}" | grep -oE 'Loaded image[^:]*: \S+' | awk '{print $NF}' | head -1)
-if [ -z "${UKI_EXT_IMAGE}" ]; then
-    echo "ERROR: Could not determine loaded image name from: ${UKI_EXT_LOAD}" >&2
+log "Loading installer image..."
+INSTALLER_LOAD=$("${CONTAINER_RUNTIME}" load -i "${INSTALLER_OUT}/installer-arm64.tar" 2>&1)
+echo "${INSTALLER_LOAD}"
+INSTALLER_LOCAL_IMAGE=$(echo "${INSTALLER_LOAD}" | grep -oE 'Loaded image[^:]*: \S+' | awk '{print $NF}' | head -1)
+if [ -z "${INSTALLER_LOCAL_IMAGE}" ]; then
+    echo "ERROR: Could not determine loaded image name from: ${INSTALLER_LOAD}" >&2
     exit 1
 fi
-UKI_EXT_REF="uki-ext-installer:${TALOS_VERSION#v}"
-"${CONTAINER_RUNTIME}" tag "${UKI_EXT_IMAGE}" "${UKI_EXT_REF}"
-log "UKI-with-extensions installer tagged: ${UKI_EXT_REF}"
-
-# ---------------------------------------------------------------------------
-# Step 3b: Build overlay installer (NO extensions)
-#
-# Produces the board-support artifacts (U-Boot, DTBs, sbc-rockchip overlay
-# installer binary) that the turingrk1 installer needs.  The vmlinuz.efi
-# produced here has no extensions; it will be replaced in step 3c.
-# ---------------------------------------------------------------------------
-
-log "Pass 2: building overlay installer (no extensions)..."
-
-OVERLAY_OUT="${PKGS_WORK_DIR}/overlay-out"
-mkdir -p "${OVERLAY_OUT}"
-
-"${CONTAINER_RUNTIME}" run --rm \
-    -v "${OVERLAY_OUT}:/out" \
-    "${CUSTOM_IMAGER_REF}" \
-    installer \
-    --arch arm64 \
-    --overlay-image ghcr.io/siderolabs/sbc-rockchip:v0.2.0 \
-    --overlay-name turingrk1 \
-    2>&1
-
-log "Loading overlay installer image..."
-OVERLAY_LOAD=$("${CONTAINER_RUNTIME}" load -i "${OVERLAY_OUT}/installer-arm64.tar" 2>&1)
-echo "${OVERLAY_LOAD}"
-OVERLAY_IMAGE=$(echo "${OVERLAY_LOAD}" | grep -oE 'Loaded image[^:]*: \S+' | awk '{print $NF}' | head -1)
-if [ -z "${OVERLAY_IMAGE}" ]; then
-    echo "ERROR: Could not determine loaded image name from: ${OVERLAY_LOAD}" >&2
-    exit 1
-fi
-OVERLAY_REF="overlay-installer:${TALOS_VERSION#v}"
-"${CONTAINER_RUNTIME}" tag "${OVERLAY_IMAGE}" "${OVERLAY_REF}"
-log "Overlay installer tagged: ${OVERLAY_REF}"
-
-# ---------------------------------------------------------------------------
-# Step 3c: Combine — overlay installer base + extension-bearing UKI
-#
-# Extract vmlinuz.efi from the pass-1 installer (has extension squashfs in its
-# initramfs CPIO) and build a new image FROM the pass-2 installer that
-# replaces its bare vmlinuz.efi with ours.
-# ---------------------------------------------------------------------------
-
-log "Combining: replacing vmlinuz.efi in overlay installer with extension-bearing UKI..."
-
-COMBINED_CTX="${PKGS_WORK_DIR}/combined-ctx"
-mkdir -p "${COMBINED_CTX}"
-
-# Extract the extension-bearing vmlinuz.efi by creating a temporary container.
-# chmod 644: docker cp preserves the in-container file ownership (root:root,
-# mode 0400 in Talos installer images), which would cause the subsequent
-# docker cp into the patch container to fail with "permission denied".
-EXTRACT_CID=$("${CONTAINER_RUNTIME}" create "${UKI_EXT_REF}")
-"${CONTAINER_RUNTIME}" cp "${EXTRACT_CID}:/usr/install/arm64/vmlinuz.efi" "${COMBINED_CTX}/vmlinuz.efi"
-"${CONTAINER_RUNTIME}" rm "${EXTRACT_CID}"
-chmod 644 "${COMBINED_CTX}/vmlinuz.efi"
-log "Extracted vmlinuz.efi ($(du -sh "${COMBINED_CTX}/vmlinuz.efi" | cut -f1)) from ${UKI_EXT_REF}"
-
-cat > "${COMBINED_CTX}/Dockerfile" <<DOCKERFILE
-FROM ${OVERLAY_REF}
-# Replace the bare overlay-installer UKI (no extensions in initramfs) with the
-# one built in pass 1 (standard imager path, extensions embedded as squashfs).
-COPY vmlinuz.efi /usr/install/arm64/vmlinuz.efi
-DOCKERFILE
-
-COMBINED_REF="combined-installer:${TALOS_VERSION#v}"
-if [ "${CONTAINER_RUNTIME}" = "docker" ]; then
-    # docker buildx uses an isolated image store (docker-container driver) and
-    # cannot see images loaded into the Docker daemon via `docker load`.  Use
-    # `docker commit` against the daemon directly so no registry round-trip is
-    # needed and no buildx image-store isolation issue arises.
-    PATCH_CID=$(docker create "${OVERLAY_REF}")
-    docker cp "${COMBINED_CTX}/vmlinuz.efi" "${PATCH_CID}:/usr/install/arm64/vmlinuz.efi"
-    docker commit "${PATCH_CID}" "${COMBINED_REF}"
-    docker rm "${PATCH_CID}"
-else
-    podman build \
-        --platform linux/arm64 \
-        --tag "${COMBINED_REF}" \
-        "${COMBINED_CTX}"
-fi
-log "Combined installer built: ${COMBINED_REF}"
+INSTALLER_LOCAL_REF="npu-installer:${TALOS_VERSION#v}"
+"${CONTAINER_RUNTIME}" tag "${INSTALLER_LOCAL_IMAGE}" "${INSTALLER_LOCAL_REF}"
+log "Installer tagged: ${INSTALLER_LOCAL_REF}"
 
 log "Pushing installer to ${INSTALLER_IMAGE}..."
 # Tag and push to an EXISTING package (installer-base) with a new tag — this
 # avoids GHCR org-level restrictions that block creating new packages via
 # GITHUB_TOKEN.
-"${CONTAINER_RUNTIME}" tag "${COMBINED_REF}" "${INSTALLER_IMAGE}"
+"${CONTAINER_RUNTIME}" tag "${INSTALLER_LOCAL_REF}" "${INSTALLER_IMAGE}"
 "${CONTAINER_RUNTIME}" push "${INSTALLER_IMAGE}"
 
 log "Done! Installer pushed: ${INSTALLER_IMAGE}"

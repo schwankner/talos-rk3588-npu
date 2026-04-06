@@ -340,4 +340,91 @@ with maintenance mode DHCP will make the node unrecoverable without physical int
 
 ---
 
+## Bug 16: NPU installer breaks Ethernet in maintenance mode — node unreachable after upgrade
+
+**Symptom:** After `talosctl upgrade --image <npu-installer>`, the node reboots, enters
+maintenance mode (due to Bug 13 repartitioning) and then never responds to ping or talosctl on
+any IP address. The UART shows Talos booted successfully and entered maintenance mode, but only
+NTP failures (`network is unreachable`) fill the log indefinitely. No DHCP is obtained. The
+standard `tpi flash` + `apply-config` recovery cycle works fine (standard siderolabs kernel gets
+DHCP on 10.0.70.x within 30s).
+
+**Root cause (hypothesis):** The two-pass NPU installer combines:
+1. Our custom kernel + NPU extensions (rknpu, rknn-libs) in the UKI initramfs
+2. The sbc-rockchip v0.2.0 overlay U-Boot/DTBs
+
+When the combined installer runs on upgrade, it installs U-Boot with the sbc-rockchip DTB that
+adds NPU nodes (`rockchip,rk3588-rknn-core` compatible, per Bug 7's rknn.patch). During the
+subsequent maintenance mode boot, udevd triggers 3 `modprobe rknpu` attempts for the 3 NPU
+cores (fdab0000, fdac0000, fdad0000). Each attempt fails with `Loading of module with unavailable
+key is rejected` — our rknpu.ko is built and signed, but the signing key doesn't match the
+running kernel's key (see Bug 10). This causes 3 NPU devices to remain unprobed, keeping their
+PM domain in `sync_state() pending`. Whether this specifically blocks the Ethernet power domain
+sync is unconfirmed, but the Ethernet never initializes.
+
+**Evidence:** UART from NPU installer boot shows:
+```
+[ 8.160074] Loading of module with unavailable key is rejected
+[ 8.257573] Loading of module with unavailable key is rejected
+[ 8.307102] Loading of module with unavailable key is rejected
+[16.116525] rockchip-pm-domain fd8d8000.power-management:power-controller: sync_state() pending due to fdab0000.npu
+[16.128207] rockchip-pm-domain fd8d8000.power-management:power-controller: sync_state() pending due to fdac0000.npu
+[16.139879] rockchip-pm-domain fd8d8000.power-management:power-controller: sync_state() pending due to fdad0000.npu
+[16.237890] rockchip-pm-domain fd8d8000.power-management:power-controller: sync_state() pending due to fe1c0000.ethernet
+```
+No network events after this; Ethernet never probes.
+
+**Recovery:** Use `tpi flash` to write the standard Talos metal image (same schematic as
+`worker2.yaml`'s `install.image`), then re-apply the machine config:
+```bash
+tpi flash -n 4 --image-path /private/tmp/talos-turingrk1-v1.12.6.raw \
+  --host 10.0.70.2 --user root --password turing
+tpi power off -n 4 --host 10.0.70.2 --user root --password turing
+tpi power on  -n 4 --host 10.0.70.2 --user root --password turing
+# Wait ~90s for maintenance mode (node gets 10.0.70.x via DHCP)
+talosctl apply-config --insecure --nodes 10.0.70.17 -f worker2.yaml
+```
+
+**Fix (pending):** Build the NPU installer WITHOUT the sbc-rockchip overlay step (Pass 2 and
+combine step). Without the overlay, `talosctl upgrade` does NOT repartition the eMMC (Bug 13),
+so STATE is preserved, the machine config is applied on boot, and VLAN 60 is configured before
+NTP/DNS is needed. The existing U-Boot+DTBs (already on eMMC from the working Talos install)
+are preserved as-is. The NPU DTB overlay will be added via the `rockchip-rknpu` extension
+rather than relying on the sbc-rockchip rknn.patch (see Bug 7).
+
+---
+
+## Bug 17: Colima virtiofs — Docker volume mounts only work with /private/tmp
+
+**Symptom:** `docker run -v /var/folders/xxx:/out <image>` or `-v ~/some/path:/out` appears to
+work (the container writes to `/out`), but the output files are invisible to the macOS host after
+the container exits. `docker load -i ~/some/path/file.tar` fails with "no such file or directory".
+
+**Root cause:** Colima mounts the macOS home directory into the Lima VM via virtiofs, but writes
+from Docker containers go into the colima VM's overlay filesystem, NOT back to the macOS
+filesystem. Only paths explicitly listed in `~/.colima/default/colima.yaml` under `mounts` are
+properly bidirectionally synced. The macOS temp directory (`/var/folders/...`, used by `mktemp
+-d`) is NOT mounted by default.
+
+**Solution:**
+1. Add `/private/tmp` to colima's mounts in `~/.colima/default/colima.yaml`:
+   ```yaml
+   mounts:
+     - location: /private/tmp
+       writable: true
+   ```
+2. Restart colima: `colima stop && colima start`
+3. Use `/private/tmp/...` as the base for all build work directories instead of `mktemp -d`.
+
+In `scripts/build-installer.sh`, `setup_pkgs_tree()` now uses:
+```bash
+PKGS_WORK_DIR="/private/tmp/talos-build-work-$$"
+mkdir -p "${PKGS_WORK_DIR}"
+```
+
+**Note:** `scripts/build-extensions.sh` uses the buildx layer cache (no output to host), so it
+is not affected. Only scripts that use `-v <host-path>:/out` volume mounts are affected.
+
+---
+
 *Add new bugs above this line, most recent first.*
