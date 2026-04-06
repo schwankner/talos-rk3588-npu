@@ -87,7 +87,9 @@ IMAGER_CTX="${WORK_DIR}/imager-ctx"
 mkdir -p "${IMAGER_CTX}"
 
 # Extract vmlinuz from our bldr-built kernel image.
-KERNEL_CID=$("${CONTAINER_RUNTIME}" create "${KERNEL_IMAGE}")
+# The kernel image is a scratch variant (no CMD/ENTRYPOINT); pass a dummy
+# command so docker create does not fail with "no command specified".
+KERNEL_CID=$("${CONTAINER_RUNTIME}" create "${KERNEL_IMAGE}" /nonexistent)
 "${CONTAINER_RUNTIME}" cp "${KERNEL_CID}:/boot/vmlinuz" "${IMAGER_CTX}/vmlinuz"
 "${CONTAINER_RUNTIME}" rm "${KERNEL_CID}"
 chmod 644 "${IMAGER_CTX}/vmlinuz"
