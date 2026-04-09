@@ -64,7 +64,8 @@ Mainline kernel 6.18
 │          rockchip.com/npu: "1"                      │
 │                                                     │
 │  Injected by CDI:                                   │
-│  ├── /dev/rknpu                                     │
+│  ├── /dev/dri/renderD129  (NPU DRM render node)    │
+│  ├── /dev/dri/card1       (NPU DRM master node)    │
 │  ├── /dev/dma_heap/system                           │
 │  └── /usr/lib/librknnrt.so (bind-mount)            │
 └─────────────────────────────────────────────────────┘
@@ -114,30 +115,40 @@ See `scripts/common.sh` for all pinned versions. Key components:
 
 ## Prerequisites
 
-- ARM64 build runner (native, no cross-compilation)
-- Docker with BuildKit enabled
-- A local OCI registry for intermediate images
+- ARM64 native build runner (no cross-compilation)
+- Docker with BuildKit enabled (Podman also supported)
+- GHCR write access (or a local OCI registry — set `REGISTRY`)
 
 ## Building
 
 ```bash
-# Build NPU system extensions (board-agnostic, ~30 min cold)
-make extensions
+# 1. Build kernel + NPU system extensions (~30 min cold, ~5 min cached)
+REGISTRY=ghcr.io/<org> ./scripts/build-extensions.sh
 
-# Build a flashable USB image for a specific board
-make usb BOARD=turing-rk1
-
-# Build all board images
-make all
+# 2. Build the Talos installer image (combines kernel, extensions, sbc-rockchip overlay)
+REGISTRY=ghcr.io/<org> CONTAINER_RUNTIME=docker ./scripts/build-installer.sh
 ```
+
+The installer image is pushed to `$REGISTRY/talos-rk3588-npu-installer-base:installer-v<talos-version>`.
 
 ## Installation
 
-### 1. Flash Talos to your board
+### 1. Flash base Talos to your board
+
+Flash the standard Talos metal image first (via TPI, dd, or USB), then upgrade:
 
 ```bash
-dd if=dist/talos-turing-rk1.raw of=/dev/sdX bs=4M status=progress
+# Apply machine config (the node comes up in maintenance mode)
+talosctl apply-config --insecure --nodes <ip> -f your-worker.yaml
+
+# Upgrade to the NPU installer
+talosctl upgrade --nodes <ip> \
+  --image ghcr.io/<org>/talos-rk3588-npu-installer-base:installer-v<talos-version> \
+  --preserve
 ```
+
+After upgrade the sbc-rockchip overlay repartitions the eMMC (see BUGS.md Bug 13),
+wiping STATE. Re-apply your machine config after the node reboots into maintenance mode.
 
 ### 2. Deploy the NPU device plugin
 
@@ -180,6 +191,21 @@ spec:
 [`milas/talos-sbc-rk3588`](https://github.com/milas/talos-sbc-rk3588) provides the Talos overlay for RK3588 boards (U-Boot, kernel build pipeline) but has no NPU support. This repo adds the NPU layer on top and is designed to eventually work alongside it.
 
 The kernel configuration (`config-arm64`) is derived from that project.
+
+## NPU Device Node
+
+The `w568w/rknpu-module` driver (used here for mainline kernel compatibility) registers
+the NPU as a **DRM device**, not a misc character device:
+
+| Node | Purpose |
+|------|---------|
+| `/dev/dri/renderD129` | DRM render node — mount this into inference containers |
+| `/dev/dri/card1` | DRM master node |
+
+The exact minor numbers depend on probe order; on Turing RK1 the display controller
+enumerates first (`card0`/`renderD128`), placing the NPU at `card1`/`renderD129`.
+The device plugin discovers the correct node at runtime via
+`/sys/bus/platform/drivers/rknpu/fdab0000.rknpu/drm/`.
 
 ## Known Issues
 
