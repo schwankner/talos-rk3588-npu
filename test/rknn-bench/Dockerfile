@@ -7,12 +7,12 @@
 #
 # Build (ARM64 native or via buildx):
 #   docker buildx build --platform linux/arm64 \
-#     -t ghcr.io/schwankner/rknn-bench:v1 --push .
+#     -t ghcr.io/schwankner/rknn-bench:v9 --push .
 
 FROM python:3.11-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libgomp1 \
+        libgomp1 strace \
     && rm -rf /var/lib/apt/lists/*
 
 # rknn-toolkit-lite2 wheel (Python wrapper that dlopen()s librknnrt.so)
@@ -30,6 +30,7 @@ COPY resnet18.rknn /model/resnet18.rknn
 COPY space_shuttle_224.jpg /model/space_shuttle_224.jpg
 
 COPY bench.py /bench.py
+COPY bench_v9.py /bench_v9.py
 
 ENTRYPOINT ["python3", "/bench.py"]
 CMD ["--mode", "npu", "--iterations", "200"]

@@ -1,0 +1,32 @@
+---
+# Step-by-step init_runtime crash diagnosis
+# Decomposes init_runtime() into individual sub-calls to identify which one
+# causes the node to crash.  The last "STEP N: done" line in kubectl logs
+# tells us exactly where the crash occurs.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: rknn-bench-v9-steps
+  namespace: default
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: bench
+          image: ghcr.io/schwankner/rknn-bench:v9
+          imagePullPolicy: Always
+          command: ["python3", "/bench_v9.py"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            limits:
+              rockchip.com/npu: "1"
+              cpu: "2"
+              memory: 512Mi
+            requests:
+              cpu: "1"
+              memory: 256Mi

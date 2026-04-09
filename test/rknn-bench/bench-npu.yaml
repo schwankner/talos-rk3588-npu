@@ -3,6 +3,12 @@
 # Runs 200 ResNet18 inferences on the RK3588 NPU via CDI injection.
 # CDI provides: /dev/dri/renderD128, /dev/dri/card0, /usr/lib/librknnrt.so
 #
+# SoC detection: rknnlite reads /proc/device-tree/compatible.
+# /sys/firmware is masked read-only in pods; bench.py patches builtins.open
+# to intercept that specific path and return the known RK3588 compatible string,
+# allowing rknnlite's Cython _get_target_soc to set its internal target_soc
+# C-struct field correctly.
+#
 # Expected result: ~100-300 fps (< 10 ms/inference)
 apiVersion: batch/v1
 kind: Job
@@ -14,20 +20,15 @@ spec:
   template:
     spec:
       restartPolicy: Never
-      hostUsers: false
-      securityContext:
-        seccompProfile:
-          type: Unconfined
       containers:
         - name: bench
-          image: ghcr.io/schwankner/rknn-bench:v2
+          image: ghcr.io/schwankner/rknn-bench:v7
           imagePullPolicy: Always
           args: ["--mode", "npu", "--iterations", "200"]
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
-            procMount: Unmasked
           resources:
             limits:
               rockchip.com/npu: "1"

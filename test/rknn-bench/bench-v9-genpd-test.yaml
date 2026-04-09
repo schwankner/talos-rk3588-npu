@@ -1,0 +1,82 @@
+---
+# Hypothesis test: force NPU genpd devices always-on BEFORE running init_runtime()
+# An init container finds all genpd devices associated with rknpu and writes "on"
+# to their power/control sysfs entries, preventing SCMI power-domain-on at ioctl time.
+# If this prevents the crash, Bug 25 root cause is confirmed.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: rknn-bench-genpd-test
+  namespace: default
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      initContainers:
+        - name: genpd-force-on
+          image: alpine:3.19
+          securityContext:
+            privileged: true
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              echo "=== NPU genpd devices ==="
+              # Find all devices under power-management:power-controller that have 'npu' in name
+              find /sys/devices/platform/ -name "*.power-controller" -o -name "*power-controller*" 2>/dev/null | head -5 || true
+              find /sys/devices/platform/ -path "*power-management*npu*" 2>/dev/null | head -20 || true
+              # Also look for the genpd virtual devices linked to rknpu
+              ls /sys/bus/platform/devices/fdab0000.rknpu/ 2>/dev/null | grep consumer || true
+              # Find supplier/consumer links
+              for f in $(find /sys/bus/platform/devices/ -name "consumer:platform:fdab0000.rknpu" 2>/dev/null); do
+                dev=$(dirname $f)
+                echo "Found consumer device: $dev"
+                if [ -f "$dev/power/control" ]; then
+                  echo "Setting $dev/power/control = on"
+                  echo on > "$dev/power/control"
+                  echo "Status: $(cat $dev/power/runtime_status)"
+                fi
+              done
+              # Also check supplier links FROM rknpu
+              for f in $(find /sys/bus/platform/devices/fdab0000.rknpu/ -name "supplier:*" 2>/dev/null); do
+                name=$(basename $f)
+                path=${name#supplier:}
+                path=${path/://}
+                echo "Supplier: $path"
+                if [ -f "/sys/$path/power/control" ]; then
+                  echo "  power/control: $(cat /sys/$path/power/control)"
+                  echo "  runtime_status: $(cat /sys/$path/power/runtime_status 2>/dev/null || echo n/a)"
+                fi
+              done
+              echo "=== fdab0000.rknpu power state ==="
+              cat /sys/bus/platform/devices/fdab0000.rknpu/power/runtime_status
+              cat /sys/bus/platform/devices/fdab0000.rknpu/power/control
+              echo "=== genpd device search ==="
+              # Virtual genpd devices typically appear as children of the rknpu platform dev
+              ls -la /sys/bus/platform/devices/fdab0000.rknpu/ | grep -v "^total" | head -30
+              echo "done"
+          volumeMounts:
+            - name: sys
+              mountPath: /sys
+      containers:
+        - name: bench
+          image: ghcr.io/schwankner/rknn-bench:v9
+          imagePullPolicy: Always
+          command: ["python3", "/bench_v9.py"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            limits:
+              rockchip.com/npu: "1"
+              cpu: "2"
+              memory: 512Mi
+            requests:
+              cpu: "1"
+              memory: 256Mi
+      volumes:
+        - name: sys
+          hostPath:
+            path: /sys
