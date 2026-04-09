@@ -1,0 +1,88 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Talos Linux RK3588 NPU — dependency update config.\n\nWhen Renovate opens a PR, CI runs (shellcheck + go vet + YAML validate).\nAfter CI passes, Renovate automerges to main.\nauto-tag.yaml then creates a versioned tag → release.yaml builds the full release.",
+  "extends": [
+    "config:base",
+    ":dependencyDashboard"
+  ],
+  "labels": ["dependencies"],
+  "assignees": ["schwankner"],
+  "reviewers": ["schwankner"],
+  "schedule": ["at any time"],
+  "prCreation": "not-pending",
+  "prHourlyLimit": 3,
+  "prConcurrentLimit": 5,
+  "automerge": true,
+  "automergeType": "pr",
+  "automergeStrategy": "squash",
+  "packageRules": [
+    {
+      "description": "Group all Talos stack updates (Talos + kernel + pkgs commit)",
+      "matchManagers": ["regex"],
+      "matchFileNames": ["scripts/common.sh"],
+      "groupName": "Talos stack",
+      "groupSlug": "talos-stack",
+      "labels": ["dependencies", "talos-update"],
+      "automerge": true,
+      "commitMessageTopic": "Talos stack"
+    },
+    {
+      "description": "GitHub Actions — automerge all updates (pinned SHA digests preferred)",
+      "matchManagers": ["github-actions"],
+      "automerge": true,
+      "automergeType": "pr"
+    },
+    {
+      "description": "Docker base images in Dockerfiles — require manual review",
+      "matchManagers": ["dockerfile"],
+      "automerge": false
+    },
+    {
+      "description": "Go dependencies — automerge patch updates only",
+      "matchManagers": ["gomod"],
+      "matchUpdateTypes": ["patch"],
+      "automerge": true
+    }
+  ],
+  "regexManagers": [
+    {
+      "description": "Talos version in common.sh",
+      "fileMatch": ["^scripts/common\\.sh$"],
+      "matchStrings": [
+        "TALOS_VERSION=\"\\$\\{TALOS_VERSION:-(?<currentValue>[^}\"]+)\\}\""
+      ],
+      "depNameTemplate": "siderolabs/talos",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^v?(?<version>.*)$"
+    },
+    {
+      "description": "Kernel version in common.sh",
+      "fileMatch": ["^scripts/common\\.sh$"],
+      "matchStrings": [
+        "KERNEL_VERSION=\"\\$\\{KERNEL_VERSION:-(?<currentValue>[^}-]+)-talos\\}\""
+      ],
+      "depNameTemplate": "torvalds/linux",
+      "datasourceTemplate": "github-tags",
+      "extractVersionTemplate": "^v?(?<version>.*)$",
+      "versioningTemplate": "semver-coerced"
+    },
+    {
+      "description": "RKNN runtime version in common.sh",
+      "fileMatch": ["^scripts/common\\.sh$"],
+      "matchStrings": [
+        "RKNN_RUNTIME_VERSION=\"\\$\\{RKNN_RUNTIME_VERSION:-(?<currentValue>[^}\"]+)\\}\""
+      ],
+      "depNameTemplate": "airockchip/rknn-toolkit2",
+      "datasourceTemplate": "github-releases"
+    },
+    {
+      "description": "Talos version referenced in GitHub Actions workflows",
+      "fileMatch": ["^\\.github/workflows/.+\\.ya?ml$"],
+      "matchStrings": [
+        "TALOS_VERSION: '(?<currentValue>[^']+)'"
+      ],
+      "depNameTemplate": "siderolabs/talos",
+      "datasourceTemplate": "github-releases"
+    }
+  ]
+}
