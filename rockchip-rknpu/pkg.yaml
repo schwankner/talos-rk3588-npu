@@ -39,6 +39,15 @@ steps:
         # We ship the patched Kbuild in files/ to ensure bldr cache is
         # invalidated deterministically (sed on a cached layer is invisible).
         cp /pkg/files/Kbuild ./Kbuild
+
+        # Add MODULE_DEVICE_TABLE so udev autoloads rknpu.ko when the kernel
+        # reports a DT device with compatible = "rockchip,rk3588-rknpu".
+        # Without this, modules.alias has no "of:" entry and udevd never
+        # triggers modprobe -- leaving fdab0000.rknpu unprobed, which keeps
+        # the NPU PM domain sync_state() pending and blocks Ethernet (Bug 16)
+        # even in Talos maintenance mode (where machine.kernel.modules is not
+        # applied).
+        python3 -c "import sys; d=open('src/rknpu_drv.c').read(); d=d.replace('\t{},\n};\n\nstatic int rknpu_get_drv_version', '\t{},\n};\nMODULE_DEVICE_TABLE(of, rknpu_of_match);\n\nstatic int rknpu_get_drv_version', 1); open('src/rknpu_drv.c','w').write(d); sys.exit(0 if 'MODULE_DEVICE_TABLE(of, rknpu_of_match)' in d else 1)"
     build:
       - |
         # Build rknpu.ko against the Talos kernel source.

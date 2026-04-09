@@ -359,48 +359,83 @@ NTP failures (`network is unreachable`) fill the log indefinitely. No DHCP is ob
 standard `tpi flash` + `apply-config` recovery cycle works fine (standard siderolabs kernel gets
 DHCP on 10.0.70.x within 30s).
 
-**Root cause (hypothesis):** The two-pass NPU installer combines:
-1. Our custom kernel + NPU extensions (rknpu, rknn-libs) in the UKI initramfs
-2. The sbc-rockchip v0.2.0 overlay U-Boot/DTBs
+**Root cause (confirmed — two independent issues):**
 
-When the combined installer runs on upgrade, it installs U-Boot with the sbc-rockchip DTB that
-adds NPU nodes (`rockchip,rk3588-rknn-core` compatible, per Bug 7's rknn.patch). During the
-subsequent maintenance mode boot, udevd triggers 3 `modprobe rknpu` attempts for the 3 NPU
-cores (fdab0000, fdac0000, fdad0000). Each attempt fails with `Loading of module with unavailable
-key is rejected` — our rknpu.ko is built and signed, but the signing key doesn't match the
-running kernel's key (see Bug 10). This causes 3 NPU devices to remain unprobed, keeping their
-PM domain in `sync_state() pending`. Whether this specifically blocks the Ethernet power domain
-sync is unconfirmed, but the Ethernet never initializes.
+**Issue A — initramfs module signing key mismatch (primary, caused no-network):**
+The siderolabs imager ships `/usr/install/arm64/initramfs.xz` whose `lib/modules/<kver>/`
+tree is signed with the Siderolabs ephemeral build key. Our bldr-built kernel runs with
+`module.sig_enforce=1` and rejects any module signed with a foreign key. `dwmac-rk.ko`
+(the RK3588 GMAC/ethernet driver) ships as a loadable module, NOT built-in. When udevd
+tries to `modprobe dwmac_rk` for `fe1c0000.ethernet`, the kernel rejects it silently.
+No ethernet driver → no DHCP → node appears dead on the network.
 
-**Evidence:** UART from NPU installer boot shows:
+The earlier `build-installer.sh` replaced `/usr/install/arm64/vmlinuz` with our
+bldr-built kernel, but left the siderolabs-signed modules in `initramfs.xz` untouched.
+
+UART evidence (custom kernel boot, before fix):
+```
+[8.907292] Loading of module with unavailable key is rejected
+[8.908194] Loading of module with unavailable key is rejected
+```
+(Two rejections: `dwmac-rk.ko` once per modprobe attempt; ethernet never probes.)
+
+**Issue B — DTB `assigned-clocks` in vendor NPU node (secondary, caused PM domain delay):**
+The initial DTB patch inserted `assigned-clocks = <0x0a 0x06>` and
+`assigned-clock-rates = <0xbebc200>` into the vendor `rknpu@fdab0000` node. The SCMI
+firmware processes these during probe, which interferes with the PM domain sync_state
+accounting and delays/blocks `fe1c0000.ethernet` probe in some boot paths. Fixed by
+omitting both properties from NEW_NODE.
+
+**Evidence:** UART from earlier NPU installer boot with wrong DTB + wrong initramfs:
 ```
 [ 8.160074] Loading of module with unavailable key is rejected
-[ 8.257573] Loading of module with unavailable key is rejected
-[ 8.307102] Loading of module with unavailable key is rejected
-[16.116525] rockchip-pm-domain fd8d8000.power-management:power-controller: sync_state() pending due to fdab0000.npu
-[16.128207] rockchip-pm-domain fd8d8000.power-management:power-controller: sync_state() pending due to fdac0000.npu
-[16.139879] rockchip-pm-domain fd8d8000.power-management:power-controller: sync_state() pending due to fdad0000.npu
-[16.237890] rockchip-pm-domain fd8d8000.power-management:power-controller: sync_state() pending due to fe1c0000.ethernet
+[16.237890] rockchip-pm-domain ...: sync_state() pending due to fe1c0000.ethernet
 ```
-No network events after this; Ethernet never probes.
+Ethernet never probed. With patched DTB + vanilla kernel (correct signing), ethernet probed
+at t=8.7s and node received DHCP. This isolated Issue B from Issue A.
 
-**Recovery:** Use `tpi flash` to write the standard Talos metal image (same schematic as
-`worker2.yaml`'s `install.image`), then re-apply the machine config:
+**Recovery:** Use `tpi flash` to write the standard Talos metal image, then re-apply config:
 ```bash
 tpi flash -n 4 --image-path /private/tmp/talos-turingrk1-v1.12.6.raw \
-  --host 10.0.70.2 --user root --password turing
-tpi power off -n 4 --host 10.0.70.2 --user root --password turing
-tpi power on  -n 4 --host 10.0.70.2 --user root --password turing
-# Wait ~90s for maintenance mode (node gets 10.0.70.x via DHCP)
-talosctl apply-config --insecure --nodes 10.0.70.17 -f worker2.yaml
+  --host 10.0.10.40 --user root --password turing
+tpi power off -n 4 --host 10.0.10.40 --user root --password turing
+tpi power on  -n 4 --host 10.0.10.40 --user root --password turing
+# Wait ~90s for maintenance mode (node gets 10.0.10.x via DHCP)
+talosctl apply-config --insecure --nodes <dhcp-ip> -f worker2.yaml
 ```
 
-**Fix:** Build a custom imager that embeds our bldr-built kernel instead of the siderolabs
-kernel. Both the running kernel and `rknpu.ko` are then signed with the same key (K1, from the
-shared `kernel-build` bldr cache layer). See Bug 11 for the full explanation.
+**Fix (Issue A):** `scripts/build-installer.sh` patches the kernel modules inside
+the imager's `initramfs.xz` before building `CUSTOM_IMAGER_REF`.
 
-Implementation in `scripts/build-extensions.sh` (`build_kernel` target) and
-`scripts/build-installer.sh` (custom imager build step before Pass 1).
+Important: `initramfs.xz` is a Zstandard-compressed (not XZ despite the name) CPIO
+containing only two entries: `/init` (the Talos init binary) and `/rootfs.sqsh` (a
+squashfs of the full Talos rootfs). The kernel modules live **inside** `rootfs.sqsh`
+at `lib/modules/<kver>/`, NOT as loose files in the CPIO.
+
+The fix unpacks the CPIO, unsquashes `rootfs.sqsh`, replaces `lib/modules/<kver>/`
+with our bldr-signed modules, resquashes, and repacks the CPIO. The imager's
+`installer` command then runs depmod against our signed modules, producing a
+`modules.dep` system extension squashfs that our kernel accepts. (Step: "Patching
+kernel modules inside rootfs.sqsh in initramfs.xz")
+
+Implementation note: all unsquash/resquash work runs INSIDE a container (not via
+volume mount) to avoid macOS/colima filesystem permission errors with root-owned Talos
+rootfs files (related to Bug 17). The approach: `docker run -d alpine:3.21 sleep 3600`,
+`docker cp` files in, `docker exec` to do the work, `docker cp` result out.
+`mksquashfs -comp xz` is used (not zstd) since Alpine's squashfs-tools ships with xz.
+
+**Fix (Issue B):** `NEW_NODE` in `scripts/build-installer.sh` omits `assigned-clocks` and
+`assigned-clock-rates`. These were derived from the vendor DTS but are not required for
+rknpu.ko to probe and trigger SCMI clock setup independently.
+
+**Status: VERIFIED FIXED** (2026-04-09) — after upgrade to NPU installer, both
+`dwmac_rk` and `rknpu` load without rejection. `dmesg` confirms:
+```
+[drm] Initialized rknpu 0.9.8 for fdab0000.rknpu on minor 1
+rk_gmac-dwmac fe1c0000.ethernet end0: Link is Up - 1Gbps/Full
+```
+Node gets DHCP, Talos API responds on 50000. `/modules.dep` extension carries
+bldr-signed modules that the bldr-built kernel accepts.
 
 ---
 
@@ -434,6 +469,261 @@ mkdir -p "${PKGS_WORK_DIR}"
 
 **Note:** `scripts/build-extensions.sh` uses the buildx layer cache (no output to host), so it
 is not affected. Only scripts that use `-v <host-path>:/out` volume mounts are affected.
+
+---
+
+## Bug 18: `docker buildx rm` does NOT clear the BuildKit local layer cache — rknpu.ko uses stale signing key
+
+**Symptom:** After running `docker buildx rm <builder> && docker buildx create --name <builder>`,
+the new builder's `docker buildx build --target rockchip-rknpu --cache-from build-cache/kernel`
+still shows ALL stages CACHED (including `rockchip-rknpu:build-0`). The rknpu.ko is signed with
+the old key (K_old), not the fresh K3 key that was just built into `build-cache/kernel`. The node
+continues to get `Loading of module with unavailable key is rejected` after upgrade.
+
+**Root cause:** `docker buildx rm` removes the builder *container* but does **not** delete the
+named Docker volume that holds the BuildKit layer store:
+```
+buildx_buildkit_<builder-name>0_state   (15–20 GB)
+```
+When `docker buildx create --name <same-name>` is called, Docker creates a new builder container
+that **reuses this existing volume** (because the volume name is deterministic from the builder
+name). The new builder inherits all cached layers from the old builder, including K_old
+`rockchip-rknpu` layers. When `--cache-from build-cache/kernel` is used for the rknpu build,
+BuildKit finds K_new kernel-build layers in the registry cache, but then finds K_old rknpu
+compilation layers in the **local** BuildKit cache (which takes priority) — even though the
+cache key should differ (K_new parent ≠ K_old parent).
+
+**Why local cache beats registry cache-from:** BuildKit evaluates layer cache keys from the
+current build inputs. If the local cache was populated by a prior build that used K_old
+kernel-build → K_old rknpu, and the current build with `--cache-from build-cache/kernel` resolves
+kernel-build to K_old (because build-cache/kernel still contains K_old — see root cause below),
+then ALL rknpu layers are a local cache hit.
+
+**The deeper root cause — kernel image vs. cache divergence:** The `--no-cache` kernel build
+writes K3 to `build-cache/kernel` (registry) but the **kernel image**
+(`talos-rk3588-kernel:6.18.18-talos`) may not be updated if the `--push` fails silently when
+`--cache-to mode=max` exhausts the Docker data disk. With `disk: 60 GiB` in colima.yaml and a
+15 GiB pre-existing builder volume + 17 GiB Docker images, a fresh `--no-cache` kernel build
+accumulates ~20 GiB in the new builder volume, then `--cache-to mode=max` tries to export ~20 GiB
+to the registry — exceeding the free space and aborting with
+`ResourceExhausted: mkdir .../ingest/...: no space left on device`.
+When this happens, `--push` may also be aborted, leaving the kernel image at K_old.
+
+**Full failure chain:**
+1. `docker buildx rm old-builder` → removes container, keeps volume (K_old data)
+2. `docker buildx create --name same-name` → new container, REUSES volume (K_old still inside)
+3. `docker buildx build --no-cache --target kernel --cache-to build-cache/kernel,mode=max` →
+   builds K3 kernel, exports cache, **fails** with no-space → kernel IMAGE push may also fail
+4. `docker buildx build --target rockchip-rknpu --cache-from build-cache/kernel` →
+   kernel-build: registry K3 cache HIT (if export completed) → BUT local volume K_old wins →
+   rknpu compiled with K_old → K_old rknpu.ko pushed
+5. Installer uses K_old/K3 kernel image + K3/K_old rknpu.ko → MISMATCH → "key rejected"
+
+**Solution:** Three-step fix:
+
+1. **Explicitly delete the builder volume** before recreating:
+   ```bash
+   docker buildx rm talos-rk3588-builder 2>/dev/null || true
+   docker volume rm buildx_buildkit_talos-rk3588-builder0_state 2>/dev/null || true
+   ```
+
+2. **NO `--cache-to` on kernel build** to avoid disk exhaustion. The local BuildKit cache
+   (inside the new builder volume) is the only cache needed for the shared-key guarantee:
+   ```bash
+   docker buildx build --no-cache --target kernel --push --tag kernel:version \
+       # NO --cache-to: avoids 20+ GiB registry export that exhausts 60 GiB colima disk
+   ```
+
+3. **Build rknpu WITHOUT `--cache-from` and WITHOUT `--no-cache`**, relying solely on the local
+   BuildKit cache from step 2.
+
+   **⚠️ THIS STEP-3 APPROACH DOES NOT WORK — see Bug 19.** BuildKit's `--no-cache` in step 2
+   stores results with random cache IDs that step 3 cannot find via content-addressed lookup.
+   The kernel-build stage in step 3 runs fresh (generates a new key K6 ≠ K5), resulting in
+   another mismatch. Use `docker buildx bake` instead (Bug 19).
+
+**Implemented in:** `/private/tmp/rebuild-correct.sh` (BROKEN — use rebuild-bake.sh instead).
+
+---
+
+## Bug 19: `--no-cache` builds store results with random cache IDs — subsequent builds cannot reuse them
+
+**Symptom:** After rebuilding the kernel with `--no-cache` (step 2 of the Bug 18 fix), the
+subsequent rknpu build (step 3, without `--no-cache`) runs `kernel-build:build-0` for **~22
+minutes** instead of getting a local cache HIT. The rknpu.ko ends up signed with a DIFFERENT key
+than the kernel image. Bug 16 (no Ethernet) persists after upgrade.
+
+Confirmed in the build log:
+```
+#40 kernel-build:build-0
+#40 DONE 1329.6s     ← 22 minutes: definitely NOT a cache hit
+```
+
+**Root cause:** BuildKit's `--no-cache` flag forces re-execution of all steps. The results **are**
+written to the local BuildKit content store, but with **random cache IDs** (not the normal
+content-addressed hash of instruction + parent). A subsequent build (without `--no-cache`) computes
+normal content-addressed cache keys to look up results, which do **not** match the random IDs stored
+by the `--no-cache` run. The result: every step is a cache miss, a fresh kernel-build runs, and a
+new ephemeral signing key K_new2 ≠ K5 is generated.
+
+Additional symptom in the step-3 log:
+```
+#14 kernel-prepare:cksum-verify
+#14 ERROR: failed to load ref: m8yxmcz6gly34s6ghos3nb8m7: not found
+```
+BuildKit's cache metadata from the `--no-cache` run references content blobs that were stored under
+random IDs; subsequent normal builds cannot resolve those refs → cache miss → fresh kernel-build.
+
+**FAILED attempt — `docker buildx bake --no-cache`:** Both bake targets get their own independent
+kernel-build execution. Confirmed in bake2 log:
+```
+#54 [rockchip-rknpu] kernel-build:build-0   ← rockchip-rknpu's OWN kernel-build
+#55 [kernel] kernel-build:build-0            ← kernel's OWN kernel-build
+```
+Two runs → two signing keys → mismatch. The bake DAG deduplication only applies within a single
+target's graph; cross-target sharing does not occur when `--no-cache` is used.
+
+**FAILED attempt — `--cache-to type=local,mode=max`:** With a fresh builder, build kernel with
+`--no-cache --cache-to type=local,dest=<dir>,mode=max`. The local cache export took 503.6s then
+failed with `no space left on device` on the Docker VM disk (filled by intermediate kernel compile
+artifacts). The exported cache had only 1 layer (64MB) — insufficient for a kernel-build cache hit.
+
+**Correct solution:** Build kernel and rknpu in TWO sequential `docker buildx build` calls on the
+**SAME fresh builder**, both WITHOUT `--no-cache`:
+
+1. Delete builder AND its volume (`buildx_buildkit_<name>0_state`) — ensures empty local cache
+2. Create fresh builder — forced full rebuild on next build (no old cache)
+3. Build kernel **without `--no-cache`** — empty cache forces fresh build, stores with
+   **content-addressed IDs** (not random)
+4. Build rknpu **without `--no-cache`** — kernel-build stage computes the same content-addressed
+   keys → **LOCAL CACHE HIT** → uses K_fresh → rknpu.ko signed with K_fresh
+
+No `--cache-to` or `--cache-from` needed. No disk space overhead. The builder's local content store
+(in the Docker VM) holds the shared kernel-build layers between the two sequential invocations.
+
+```bash
+# Step 0: delete builder + volume (ensures no stale K_old)
+docker buildx rm talos-rk3588-builder 2>/dev/null || true
+docker volume rm buildx_buildkit_talos-rk3588-builder0_state 2>/dev/null || true
+docker buildx create --name talos-rk3588-builder --driver docker-container --use
+
+# Step 1: build kernel (no --no-cache, content-addressed IDs, fresh build forced by empty cache)
+docker buildx build --builder talos-rk3588-builder \
+    --file pkgs/Pkgfile --target kernel --platform linux/arm64 \
+    --build-arg TAG=6.18.18-talos --build-arg PKGS=a92bed5 \
+    --tag ghcr.io/schwankner/talos-rk3588-kernel:6.18.18-talos --push pkgs/
+
+# Step 2: build rknpu (same builder, kernel-build = LOCAL CACHE HIT → K_fresh)
+docker buildx build --builder talos-rk3588-builder \
+    --file pkgs/Pkgfile --target rockchip-rknpu --platform linux/arm64 \
+    --build-arg TAG=6.18.18-talos --build-arg PKGS=a92bed5 \
+    --tag ghcr.io/schwankner/rockchip-rknpu:0.9.8-6.18.18-talos --push pkgs/
+```
+
+**Implemented in:** `/private/tmp/rebuild-shared-cache.sh`.
+
+---
+
+## Bug 20: `build-installer.sh` uses stale Docker-cached kernel/rknpu images — installer has mismatched keys
+
+**Symptom:** After a correct `docker buildx bake --push` that pushes K_fresh kernel + K_fresh rknpu
+to GHCR, `build-installer.sh` still produces an installer with MISMATCHED keys (K_old kernel +
+K_old rknpu). Bug 16 (no Ethernet) persists after upgrade with the new installer.
+
+**Root cause:** `build-installer.sh` uses `docker create` and `docker run` to extract vmlinuz from
+the kernel image and run the imager with extension images. Docker resolves image references against
+the LOCAL DAEMON CACHE first. If an image with the same tag was previously pulled (e.g., during an
+earlier failed K5+K6 build), Docker reuses the stale cached image instead of pulling the fresh one
+from GHCR — even if the GHCR tag has been updated with a new digest.
+
+Confirmed: `docker images ghcr.io/schwankner/talos-rk3588-kernel:6.18.18-talos` showed an image
+"10 hours ago" while the K_fresh bake had just completed. `docker pull` showed "Downloaded newer
+image" — confirming the local cache was stale.
+
+**Solution:** Explicitly pull kernel and rknpu images before running `build-installer.sh`:
+```bash
+docker pull ghcr.io/schwankner/talos-rk3588-kernel:6.18.18-talos
+docker pull ghcr.io/schwankner/rockchip-rknpu:0.9.8-6.18.18-talos
+REGISTRY=ghcr.io/schwankner CONTAINER_RUNTIME=docker ./scripts/build-installer.sh
+```
+
+**Long-term fix:** Add explicit `docker pull` / `podman pull` calls at the start of
+`build-installer.sh` for the kernel and extension images. The imager runs inside a container and
+pulls extension images itself (from the registry, bypassing local cache), but the vmlinuz
+extraction (`docker create / cp`) bypasses the registry pull.
+
+---
+
+## Bug 21: `--cache-to type=local,mode=max` exhausts Docker VM disk during kernel build
+
+**Symptom:** `docker buildx build --no-cache --cache-to type=local,dest=<dir>,mode=max` for the
+kernel target exits with:
+```
+ERROR: failed to solve: ResourceExhausted: write /var/lib/buildkit/runc-overlayfs/content/ingest/...: no space left on device
+```
+The local cache directory on the Mac contains only 1 layer (64MB) — the final kernel image layer —
+instead of all intermediate build stages. The rknpu build cannot get a kernel-build cache hit from
+this incomplete cache.
+
+**Root cause:** Even with `type=local`, the BuildKit daemon writes ALL cache layers to its own
+internal content store (inside the Docker VM disk at `/var/lib/buildkit/runc-overlayfs/content/`)
+before streaming them to the Mac client. The kernel build generates ~20-25GB of intermediate
+artifacts (`.o` files, overlay FS diffs), which fill the 60GB Docker VM disk. The cache export
+then fails because there is no room left in the daemon's ingest staging area.
+
+`type=local` does NOT bypass the Docker VM disk — it merely delivers the final exported bytes to
+the Mac, but the staging still happens on the VM disk.
+
+**Solution:** Do not use `--cache-to` at all. Build kernel and rknpu in two sequential calls on
+the SAME builder WITHOUT `--no-cache` (see Bug 19 for details). The builder's local content store
+already holds the shared stages; no explicit export is needed. Before starting, free VM disk space
+by pruning old images and removing the previous builder volume:
+
+```bash
+docker buildx rm talos-rk3588-builder 2>/dev/null || true
+docker volume rm buildx_buildkit_talos-rk3588-builder0_state 2>/dev/null || true
+docker image prune -af
+docker buildx prune -af
+```
+
+This reclaims 15-35GB, leaving sufficient headroom for the kernel compile.
+
+---
+
+## Bug 22: w568w/rknpu-module creates a DRM device, not /dev/rknpu
+
+**Symptom:** `rknpu.ko` loads successfully (`dmesg` shows "Initialized rknpu 0.9.8 for
+fdab0000.rknpu on minor 1"), and `lsmod` shows `rknpu` Live, but `/dev/rknpu` does not exist.
+`/sys/class/misc/rknpu` is absent.
+
+**Root cause:** The `w568w/rknpu-module` port registers the NPU as a DRM device (using the DRM
+subsystem) rather than as a misc character device. The driver calls `drm_dev_register()`, which
+creates device nodes under `/dev/dri/`. The actual device nodes are:
+
+```
+/dev/dri/card1       — DRM master node
+/dev/dri/renderD129  — DRM render node (the one to mount into NPU inference containers)
+```
+
+The exact minor numbers (`card1`, `renderD129`) depend on what other DRM devices are registered
+first. On Turing RK1, the display controller enumerates as `card0`/`renderD128`, so the NPU
+lands on `card1`/`renderD129`. This numbering is stable across reboots as long as the DT and
+module load order do not change.
+
+**Affected items:**
+- `rockchip-rknpu` extension udev rule (Bug 3): the rule for `/dev/rknpu` never fires because
+  the misc device is never created. The DRM device has its own udev rule (built into udev).
+- CDI device plugin: must expose `/dev/dri/renderD129` (and `/dev/dri/card1`), not `/dev/rknpu`.
+- RKNN Toolkit / librknnrt.so: verifies the device by reading the rknpu version via DRM ioctl on
+  the render node, not via a misc device open. The library works with the DRM render node.
+
+**Solution:** Update CDI device spec and device plugin to use `/dev/dri/renderD129`. To detect
+the correct render node at runtime, scan `/sys/bus/platform/drivers/rknpu/` for the bound device
+and follow the symlink to find its DRM minor:
+```bash
+ls /sys/bus/platform/drivers/rknpu/fdab0000.rknpu/drm/
+# → card1  renderD129
+```
 
 ---
 

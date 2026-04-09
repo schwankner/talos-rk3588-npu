@@ -18,12 +18,14 @@
 #     Take the board-support artifacts from Pass 2 (GRUB, U-Boot, DTBs) and
 #     replace its bare vmlinuz.efi with the extension-bearing one from Pass 1.
 #
-# Custom kernel required (Bug 10 / Bug 11).  The module signing key is ephemeral:
-# it is generated during the bldr kernel-build stage and never committed to the
-# pkgs source tree.  The siderolabs imager embeds a kernel signed with Siderolabs'
-# own ephemeral key; our rknpu.ko is signed with the key from our bldr build.
-# These are different keys — rknpu.ko fails to load with "key was rejected by
-# service" unless the imager's kernel is replaced with our bldr-built kernel.
+# Custom kernel required (Bug 10 / Bug 11 / Bug 16).  The module signing key is
+# ephemeral: it is generated during the bldr kernel-build stage and never committed
+# to the pkgs source tree.  The siderolabs imager embeds a kernel and initramfs
+# signed with Siderolabs' own ephemeral key.  Our rknpu.ko and all other loadable
+# modules (including dwmac-rk.ko for ethernet) must be signed with the key from our
+# bldr build.  module.sig_enforce=1 rejects any module signed with a foreign key.
+# Fix: replace both /usr/install/arm64/vmlinuz AND the lib/modules tree inside
+# /usr/install/arm64/initramfs.xz with artefacts from our bldr-built kernel image.
 #
 # Prerequisites:
 #   scripts/build-extensions.sh must be run first (or 'all' target) to build:
@@ -95,6 +97,64 @@ KERNEL_CID=$("${CONTAINER_RUNTIME}" create "${KERNEL_IMAGE}" /nonexistent)
 chmod 644 "${IMAGER_CTX}/vmlinuz"
 log "Extracted vmlinuz ($(du -sh "${IMAGER_CTX}/vmlinuz" | cut -f1)) from ${KERNEL_IMAGE}"
 
+# Extract kernel modules from our bldr-built kernel image so they can replace
+# the siderolabs-signed modules inside the imager's initramfs.xz.
+# module.sig_enforce=1 in our kernel rejects any module not signed with our key;
+# the siderolabs imager ships its own modules signed with the siderolabs key,
+# causing dwmac-rk.ko (ethernet) and others to fail with
+# "Loading of module with unavailable key is rejected". (Bug 16)
+log "Extracting kernel modules from ${KERNEL_IMAGE}..."
+KMOD_EXTRACT_DIR="${IMAGER_CTX}/kernel-modules"
+mkdir -p "${KMOD_EXTRACT_DIR}"
+KMOD_CID=$("${CONTAINER_RUNTIME}" create "${KERNEL_IMAGE}" /nonexistent)
+"${CONTAINER_RUNTIME}" cp "${KMOD_CID}:/usr/lib/modules/${KERNEL_VERSION}/." "${KMOD_EXTRACT_DIR}/"
+"${CONTAINER_RUNTIME}" rm "${KMOD_CID}"
+log "Extracted kernel modules ($(du -sh "${KMOD_EXTRACT_DIR}" | cut -f1)) from ${KERNEL_IMAGE}"
+
+# Patch the kernel modules inside the siderolabs imager's initramfs.xz.
+#
+# Structure of initramfs.xz (zstd-compressed CPIO, named .xz by Talos convention):
+#   /init          — Talos init binary
+#   /rootfs.sqsh   — squashfs of the Talos root filesystem; contains lib/modules/<kver>/
+#
+# The kernel modules live inside rootfs.sqsh, NOT as loose files in the CPIO.
+# When the imager's `installer` command builds the modules.dep system extension it
+# unsquashes rootfs.sqsh and runs depmod against lib/modules/<kver>/ found there.
+# That modules.dep squashfs is what udevd loads at runtime to resolve module aliases.
+#
+# Fix: replace lib/modules/<kver>/ inside rootfs.sqsh with our bldr-signed modules
+# before the imager runs depmod, so the resulting modules.dep extension carries
+# modules signed with our key (not the siderolabs key our kernel rejects).
+log "Patching kernel modules inside rootfs.sqsh in initramfs.xz..."
+INITRAMFS_ORIG_CID=$("${CONTAINER_RUNTIME}" create "${IMAGER_REF}")
+"${CONTAINER_RUNTIME}" cp "${INITRAMFS_ORIG_CID}:/usr/install/arm64/initramfs.xz" "${IMAGER_CTX}/initramfs-orig.xz"
+"${CONTAINER_RUNTIME}" rm "${INITRAMFS_ORIG_CID}"
+# All patching work runs inside the container (not via volume mount) to avoid
+# macOS/colima filesystem permission errors with root-owned Talos rootfs files.
+PATCH_CID=$("${CONTAINER_RUNTIME}" run -d \
+    --platform linux/amd64 \
+    alpine:3.21 \
+    sleep 3600)
+"${CONTAINER_RUNTIME}" cp "${IMAGER_CTX}/initramfs-orig.xz" "${PATCH_CID}:/tmp/initramfs-orig.xz"
+"${CONTAINER_RUNTIME}" cp "${KMOD_EXTRACT_DIR}" "${PATCH_CID}:/tmp/kernel-modules"
+"${CONTAINER_RUNTIME}" exec "${PATCH_CID}" \
+    sh -c "set -e
+           apk add --quiet cpio zstd squashfs-tools
+           mkdir -p /work/initramfs-unpacked
+           cd /work/initramfs-unpacked
+           zstd -d -c /tmp/initramfs-orig.xz | cpio -id
+           echo 'unsquashing rootfs.sqsh...'
+           unsquashfs -no-xattrs -d /work/rootfs-extracted rootfs.sqsh
+           rm -rf /work/rootfs-extracted/lib/modules/${KERNEL_VERSION}
+           mkdir -p /work/rootfs-extracted/lib/modules/${KERNEL_VERSION}
+           cp -a /tmp/kernel-modules/. /work/rootfs-extracted/lib/modules/${KERNEL_VERSION}/
+           mksquashfs /work/rootfs-extracted rootfs.sqsh -noappend -comp xz
+           # Repack the CPIO with the patched rootfs.sqsh
+           find . | cpio -H newc -o | zstd -19 -T0 -o /tmp/initramfs-patched.xz"
+"${CONTAINER_RUNTIME}" cp "${PATCH_CID}:/tmp/initramfs-patched.xz" "${IMAGER_CTX}/initramfs-patched.xz"
+"${CONTAINER_RUNTIME}" rm -f "${PATCH_CID}"
+log "Initramfs patched: $(du -sh "${IMAGER_CTX}/initramfs-patched.xz" | cut -f1)"
+
 CUSTOM_IMAGER_REF="custom-imager:${TALOS_VERSION#v}"
 
 if [ "${CONTAINER_RUNTIME}" = "docker" ]; then
@@ -102,12 +162,14 @@ if [ "${CONTAINER_RUNTIME}" = "docker" ]; then
     # driver cannot see daemon images loaded via docker load/create).
     IMAGER_PATCH_CID=$(docker create "${IMAGER_REF}")
     docker cp "${IMAGER_CTX}/vmlinuz" "${IMAGER_PATCH_CID}:/usr/install/arm64/vmlinuz"
+    docker cp "${IMAGER_CTX}/initramfs-patched.xz" "${IMAGER_PATCH_CID}:/usr/install/arm64/initramfs.xz"
     docker commit "${IMAGER_PATCH_CID}" "${CUSTOM_IMAGER_REF}"
     docker rm "${IMAGER_PATCH_CID}"
 else
     cat > "${IMAGER_CTX}/Dockerfile" <<DOCKERFILE
 FROM ${IMAGER_REF}
 COPY vmlinuz /usr/install/arm64/vmlinuz
+COPY initramfs-patched.xz /usr/install/arm64/initramfs.xz
 DOCKERFILE
     podman build \
         --platform linux/arm64 \
@@ -261,16 +323,13 @@ NEW_NODE = (
     '\t\tinterrupts = <0x00 0x6e 0x04 0x00\n'
     '\t\t              0x00 0x6f 0x04 0x00\n'
     '\t\t              0x00 0x70 0x04 0x00>;\n'
-    '\t\tinterrupt-names = "npu_irq0", "npu_irq1", "npu_irq2";\n'
+    '\t\tinterrupt-names = "npu0_irq", "npu1_irq", "npu2_irq";\n'
     '\t\tclocks = <0x0a 0x06>;\n'
     '\t\tclock-names = "clk_npu";\n'
-    '\t\tassigned-clocks = <0x0a 0x06>;\n'
-    '\t\tassigned-clock-rates = <0xbebc200>;\n'
     '\t\tresets = <0x21 0x110>;\n'
     '\t\treset-names = "srst_a";\n'
     '\t\tpower-domains = <0x22 0x09 0x22 0x0a 0x22 0x0b>;\n'
     '\t\tpower-domain-names = "nputop", "npu1", "npu2";\n'
-    '\t\tiommus = <0x66 0x67 0x68>;\n'
     '\t\tnpu-supply = <0x36>;\n'
     '\t\tsram-supply = <0x36>;\n'
     '\t\tstatus = "okay";\n'
@@ -278,7 +337,7 @@ NEW_NODE = (
 )
 
 
-def process_node(dts, node_name, disable=False, insert_after=None):
+def process_node(dts, node_name, disable=False, rename_compat=None, insert_after=None):
     lines = dts.split('\n')
     result = []
     in_node = False
@@ -297,6 +356,8 @@ def process_node(dts, node_name, disable=False, insert_after=None):
             depth += line.count('{') - line.count('}')
             if disable and 'status = "okay"' in line:
                 line = line.replace('status = "okay"', 'status = "disabled"')
+            if rename_compat and 'compatible = "rockchip,rk3588-rknn-core"' in line:
+                line = line.replace('"rockchip,rk3588-rknn-core"', f'"{rename_compat}"')
             result.append(line)
             if depth <= 0:
                 in_node = False
@@ -309,15 +370,28 @@ def process_node(dts, node_name, disable=False, insert_after=None):
 if __name__ == '__main__':
     dts = sys.stdin.read()
 
+    # Rename the per-core rknn-core nodes' compatible string so no driver
+    # (rocket or otherwise) binds to them, while keeping the nodes enabled.
+    # status=disabled removes them from OF platform enumeration entirely, so
+    # they are never registered as PM domain consumers; rockchip_pm_domain
+    # then sees fewer consumers than it expects and sync_state() does not fire
+    # in time for fe1c0000.ethernet to probe (Bug 16).  An unknown compatible
+    # string keeps the nodes as enumerated platform devices and PM domain
+    # consumers, matching the vanilla DTB's accounting.
     for addr in ['npu@fdab0000', 'npu@fdac0000', 'npu@fdad0000']:
-        dts = process_node(dts, addr, disable=True)
+        dts = process_node(dts, addr, rename_compat='rockchip,rk3588-rknn-core-noop')
 
+    # Insert the vendor rknpu node after the last NPU IOMMU node.  The IOMMU
+    # nodes are left enabled so they remain PM domain consumers and genpd
+    # sync_state() accounting is undisturbed vs the vanilla DTB.  The NEW_NODE
+    # intentionally omits the iommus property so rknpu always operates in
+    # non-iommu mode and does not attempt to use the IOMMU framework.
     dts = process_node(dts, 'iommu@fdad9000', insert_after=NEW_NODE)
 
     sys.stdout.write(dts)
 PYEOF
 
-log "Patching rk3588-turing-rk1.dtb (disabling rknn-core nodes, adding rknpu node)..."
+log "Patching rk3588-turing-rk1.dtb (renaming rknn-core compat, adding rknpu node)..."
 # Run dtc + python3 inside a container so no host toolchain is required.
 # dtc is architecture-independent: it produces the same binary DTB regardless
 # of the host CPU.  alpine:3.21 is used to avoid 'latest' tag drift.
