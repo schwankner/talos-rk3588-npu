@@ -18,6 +18,8 @@ Usage:
 """
 
 import argparse
+import ctypes
+import errno
 import os
 import sys
 import time
@@ -44,6 +46,16 @@ def load_input() -> np.ndarray:
     return np.expand_dims(arr, 0)                # NCHW
 
 
+def probe_device(path: str) -> str:
+    """Try raw open() on a device node; return 'ok' or the errno string."""
+    try:
+        fd = os.open(path, os.O_RDWR)
+        os.close(fd)
+        return "ok"
+    except OSError as e:
+        return f"FAIL({e.errno} {errno.errorcode.get(e.errno, '?')} {e.strerror})"
+
+
 def run_bench(mode: str, iterations: int) -> None:
     print(f"=== RKNN Benchmark  mode={mode}  iterations={iterations} ===")
 
@@ -52,6 +64,13 @@ def run_bench(mode: str, iterations: int) -> None:
     lib_ok = os.path.exists("/usr/lib/librknnrt.so")
 
     print(f"  DRM render node : {drm_nodes[0] if drm_nodes else 'NOT FOUND'}")
+    if drm_nodes:
+        print(f"  DRM open()      : {probe_device(drm_nodes[0])}")
+    dma_heap = "/dev/dma_heap/system"
+    print(f"  dma_heap/system : {'present' if os.path.exists(dma_heap) else 'MISSING'}", end="")
+    if os.path.exists(dma_heap):
+        print(f" open()={probe_device(dma_heap)}", end="")
+    print()
     print(f"  librknnrt.so    : {'present' if lib_ok else 'MISSING'}")
 
     if not lib_ok:
@@ -63,7 +82,7 @@ def run_bench(mode: str, iterations: int) -> None:
         sys.exit("ERROR: NPU mode but no /dev/dri/renderD* found.\n"
                  "  Add 'rockchip.com/npu: 1' to resources.limits.")
 
-    rknn = RKNNLite(verbose=False)
+    rknn = RKNNLite(verbose=True)
 
     ret = rknn.load_rknn(MODEL_PATH)
     if ret != 0:
@@ -71,7 +90,11 @@ def run_bench(mode: str, iterations: int) -> None:
     print(f"  Model           : {MODEL_PATH}")
 
     if mode == "npu":
+        print("  Trying init_runtime(core_mask=NPU_CORE_AUTO)...", flush=True)
         ret = rknn.init_runtime(core_mask=RKNNLite.NPU_CORE_AUTO)
+        if ret != 0:
+            print(f"  NPU_CORE_AUTO failed (ret={ret}), retrying without core_mask...", flush=True)
+            ret = rknn.init_runtime()
         runtime_label = "NPU (RK3588)"
     else:
         ret = rknn.init_runtime()

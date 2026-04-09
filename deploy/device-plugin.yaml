@@ -3,7 +3,7 @@
 #
 # Runs on every node labeled rockchip.com/npu-capable=true.
 # Discovers the NPU DRM device nodes dynamically via sysfs:
-#   /sys/bus/platform/drivers/rknpu/fdab0000.rknpu/drm/
+#   /sys/bus/platform/drivers/RKNPU/fdab0000.rknpu/drm/
 # Registers rockchip.com/npu with the kubelet and writes the CDI spec to
 # /var/run/cdi/rockchip-npu.yaml so containerd injects the DRM render node,
 # card node, dma_heap, and librknnrt.so into requesting containers.

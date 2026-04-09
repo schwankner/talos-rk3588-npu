@@ -15,9 +15,12 @@ spec:
     spec:
       restartPolicy: Never
       hostUsers: false
+      securityContext:
+        seccompProfile:
+          type: Unconfined
       containers:
         - name: bench
-          image: ghcr.io/schwankner/rknn-bench:v1
+          image: ghcr.io/schwankner/rknn-bench:v2
           imagePullPolicy: Always
           args: ["--mode", "npu", "--iterations", "200"]
           securityContext:
