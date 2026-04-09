@@ -78,6 +78,25 @@ setup_pkgs_tree() {
     # stage: base and stage: kernel-build dependencies.
     cp -r "${REPO_ROOT}/rockchip-rknpu"    "${PKGS_WORK_DIR}/pkgs/rockchip-rknpu"
     cp -r "${REPO_ROOT}/rockchip-rknn-libs" "${PKGS_WORK_DIR}/pkgs/rockchip-rknn-libs"
+
+    # Apply RK3588 NPU kernel config fragment on top of the upstream ARM64 config.
+    # Each line in the fragment is "KEY=value"; we remove any existing entry
+    # (commented-out or active) then append the new value.  This mirrors the
+    # behaviour of scripts/kconfig/merge_config.sh without requiring the kernel
+    # source tree at setup time.
+    local fragment="${REPO_ROOT}/kernel/config-arm64-rk3588-npu.fragment"
+    local pkgs_config="${PKGS_WORK_DIR}/pkgs/kernel/build/config-arm64"
+    log "Applying kernel config fragment: $(basename "${fragment}")"
+    while IFS= read -r line; do
+        # Skip blank lines and comment lines
+        [[ "${line}" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "${line// }" ]] && continue
+        key="${line%%=*}"
+        # Remove existing setting (active "KEY=..." or disabled "# KEY is not set")
+        sed -i "/^${key}[= ]/d; s/^# ${key} is not set$//" "${pkgs_config}"
+        echo "${line}" >> "${pkgs_config}"
+    done < "${fragment}"
+    log "Kernel config fragment applied."
 }
 
 # ---------------------------------------------------------------------------

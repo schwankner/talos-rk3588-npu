@@ -1,0 +1,10 @@
+# RK3588 NPU kernel config additions
+#
+# Applied on top of siderolabs/pkgs kernel/build/config-arm64 during
+# build-extensions.sh kernel build.
+#
+# Bug 24: librknnrt.so requires /dev/dma_heap/system for zero-copy
+# CPU<->NPU buffer allocation.  Without this, init_runtime() fails with
+# RKNN_ERR_FAIL even when /dev/dri/renderD128 is present.
+CONFIG_DMABUF_HEAPS=y
+CONFIG_DMABUF_HEAPS_SYSTEM=y
