@@ -857,4 +857,35 @@ Applied in `rockchip-rknpu/pkg.yaml` as a Python source patch during extension b
 
 ---
 
+## Bug 26: build_graph() causes hard system hang — NPU device SCMI crash at EL3
+
+**Symptom:** After the Bug 25 fix (genpd devices always-on), `init_runtime()` progresses
+past `load_rknn()` and the DRM device open, but hangs the node when `build_graph()` is
+called (RKNN step: sending model to NPU, loading firmware).  No kernel panic, requires
+BMC reset.
+
+**Root cause:** `rknpu_power_on()` in `rknpu_drv.c` has two layers of PM calls:
+
+1. `pm_runtime_resume_and_get(genpd_dev_npu0/1/2)` — fixed by Bug 25
+2. `pm_runtime_get_sync(dev)` — on the **NPU device itself** (`fdab0000.rknpu`), line 1024
+
+Bug 25 only addressed the genpd virtual devices.  After probe, `rknpu_power_off_delay_work`
+fires after 3 seconds of idle and calls `pm_runtime_put_sync(dev)`, dropping the NPU
+device's own usage count to zero and suspending it.  On the next `rknpu_power_on()` call
+(at `build_graph()`), `pm_runtime_get_sync(dev)` finds the device suspended and calls
+the NPU's `runtime_resume` callback, which issues a SCMI power-domain-on SMC → EL3 crash
+(same mechanism as Bug 25).
+
+**Fix:** Call `pm_runtime_get_noresume(dev)` immediately after `pm_runtime_enable(dev)`
+in the probe function.  This keeps the NPU device's own usage count ≥1 permanently,
+so `pm_runtime_put_sync(dev)` in `rknpu_power_off()` never actually suspends the device.
+
+Combined with Bug 25, all three SCMI-triggering PM paths are now pinned always-on:
+- `genpd_dev_npu0`, `genpd_dev_npu1`, `genpd_dev_npu2` (Bug 25)
+- `dev` = `fdab0000.rknpu` itself (Bug 26)
+
+Applied in `rockchip-rknpu/pkg.yaml` as a Python source patch during extension build.
+
+---
+
 *Add new bugs above this line, most recent first.*
