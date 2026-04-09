@@ -17,8 +17,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # rknn-toolkit-lite2 wheel (Python wrapper that dlopen()s librknnrt.so)
 # Pre-downloaded from github.com/airockchip/rknn-toolkit2 v2.3.2 packages/
-COPY rknn_toolkit_lite2-2.3.2-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl /tmp/rknn_lite.whl
-RUN pip install --no-cache-dir /tmp/rknn_lite.whl numpy Pillow && rm /tmp/rknn_lite.whl
+COPY rknn_toolkit_lite2-2.3.2-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl /tmp/
+RUN pip install --no-cache-dir \
+    /tmp/rknn_toolkit_lite2-2.3.2-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl \
+    numpy Pillow \
+    && rm /tmp/rknn_toolkit_lite2-2.3.2-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
 
 # Pre-converted ResNet18 model for RK3588 (from rknn-toolkit2 examples)
 COPY resnet18.rknn /model/resnet18.rknn

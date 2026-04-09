@@ -764,4 +764,49 @@ Then a pod with `hostUsers: false` and `securityContext.procMount: Unmasked` sta
 
 ---
 
+## Bug 24: CONFIG_DMABUF_HEAPS not set — librknnrt.so init_runtime fails
+
+**Symptom:** `rknn.init_runtime()` returns -1 (`RKNN_ERR_FAIL`).  The error sequence is:
+```
+E RKNN: failed to open rknpu module, need to insmod rknpu dirver!
+E RKNN: failed to open rknn device!
+```
+followed by:
+```
+Exception: RKNN init failed. error code: RKNN_ERR_FAIL
+```
+
+**Root cause:** `strings /usr/lib/librknnrt.so` reveals the library probes three device paths:
+```
+/dev/rknpu          ← BSP misc device (w568w DRM driver does not create this)
+/dev/dri/renderD*   ← DRM render node — found at renderD128 ✓
+/dev/dma_heap       ← DMA-BUF heap for zero-copy CPU↔NPU buffers — MISSING ✗
+```
+
+`/dev/dma_heap/system` does not exist because the Talos 1.12.x kernel is built with
+`CONFIG_DMABUF_HEAPS=n`. librknnrt.so uses DMA-BUF heaps to allocate shared buffers
+between the ARM CPU and the NPU. Without the heap device, `init_runtime` fails.
+
+**Verification:**
+```bash
+talosctl read /proc/config.gz | zcat | grep CONFIG_DMABUF_HEAPS
+# → CONFIG_DMABUF_HEAPS is not set
+ls /dev/dma_heap/
+# → lstat /dev/dma_heap: no such file or directory
+```
+
+**Fix:** Rebuild the kernel with:
+```
+CONFIG_DMABUF_HEAPS=y
+CONFIG_DMABUF_HEAPS_SYSTEM=y
+```
+This creates `/dev/dma_heap/system` on boot, which librknnrt.so requires for NPU buffer
+allocation.  The kernel build must be customised with a config overlay rather than relying
+on the upstream Siderolabs pkgs kernel, which does not enable this option for ARM64.
+
+After enabling, `/dev/dma_heap/system` should also be added to the CDI spec so it is
+injected into NPU pods alongside the DRM render node.
+
+---
+
 *Add new bugs above this line, most recent first.*
