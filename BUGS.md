@@ -807,6 +807,54 @@ on the upstream Siderolabs pkgs kernel, which does not enable this option for AR
 After enabling, `/dev/dma_heap/system` should also be added to the CDI spec so it is
 injected into NPU pods alongside the DRM render node.
 
+## Bug 25: init_runtime() causes hard system hang — NPU genpd SCMI crash at EL3
+
+**Symptom:** Calling `rknn.init_runtime()` from any Kubernetes pod (NPU or CPU mode)
+causes the entire node to hang hard.  No kernel panic, `panic=30` never fires, system
+is not pingable, requires BMC/power cycle.  `load_rknn()` completes successfully; the
+crash is specific to `init_runtime()`.
+
+**Root cause:** `rknpu_power_on()` in `rknpu_drv.c` calls
+`pm_runtime_resume_and_get(genpd_dev_npu0/1/2)` at ioctl time.  These virtual genpd
+devices represent the three NPU power domains (`npu0`, `npu1`, `npu2`).  At probe time
+the power domains are already on (ATF keeps them on during boot), so `pm_runtime_resume_and_get`
+is a no-op.  After probe, `rknpu_power_off()` calls `pm_runtime_put_sync(genpd_dev_npu*)`,
+which drops the reference count to zero and suspends the genpd devices — triggering a
+SCMI power-domain-off call into ATF, which succeeds.
+
+On the **first ioctl** from userspace (`DRM_IOCTL_RKNPU_ACTION` / `RKNPU_ACTION_GET_HW_VERSION`),
+`rknpu_power_on()` tries to re-enable the power domains via
+`pm_runtime_resume_and_get(genpd_dev_npu0)`.  This calls the Rockchip PM-domain
+`power_on()` callback, which makes a SCMI power-domain-on SMC call into ATF.  The ATF
+on mainline RK3588 (Turing RK1 / Talos 1.12 / kernel 6.18) **crashes at EL3** when
+this SCMI call is made at runtime — unlike during boot, where the NPU domain is already
+powered and the call is a no-op.
+
+**Investigation path:**
+- `iommu.passthrough=1` added → ARM SMMU-v3 in identity/passthrough mode for NPU
+  groups 7/8/9 → confirmed NOT the cause.
+- `echo on > /sys/bus/platform/devices/fdab0000.rknpu/power/control` (forces DRM
+  device always-on) → crash persists.  This only prevents the DRM device from
+  suspending, not the genpd virtual devices.
+- `fdab0000.npu` (noop device) has `iommu_group/type = identity` → ARM SMMU confirmed
+  passthrough → not the cause.
+- v8-loadonly test (`sys.exit()` before `init_runtime()`) → no crash → proves crash
+  is entirely inside `init_runtime()`.
+- Tracing `rknpu_power_on()` source: detects `multiple_domains = true` for RK3588
+  (three NPU power domains npu0/npu1/npu2); calls `pm_runtime_resume_and_get()` on
+  each genpd virtual device at every power-on; these were suspended by
+  `rknpu_power_off()` at end of probe.
+- ATF crash signature: hard hang at EL3 (not EL1), no kernel panic, panic=30 never
+  fires, requires hardware reset.
+
+**Fix:** In `rknpu_drv.c`, call `pm_runtime_get_noresume(virt_dev)` immediately after
+`dev_pm_domain_attach_by_name()` for each NPU power domain.  This keeps the genpd
+usage count ≥1 permanently, so `pm_runtime_put_sync()` in `rknpu_power_off()` never
+suspends them.  The SCMI power-domain-on call at ioctl time is never made.  NPU power
+domains remain on for the lifetime of the loaded module.
+
+Applied in `rockchip-rknpu/pkg.yaml` as a Python source patch during extension build.
+
 ---
 
 *Add new bugs above this line, most recent first.*

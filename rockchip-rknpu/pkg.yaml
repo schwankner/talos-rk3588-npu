@@ -48,6 +48,59 @@ steps:
         # even in Talos maintenance mode (where machine.kernel.modules is not
         # applied).
         python3 -c "import sys; d=open('src/rknpu_drv.c').read(); d=d.replace('\t{},\n};\n\nstatic int rknpu_get_drv_version', '\t{},\n};\nMODULE_DEVICE_TABLE(of, rknpu_of_match);\n\nstatic int rknpu_get_drv_version', 1); open('src/rknpu_drv.c','w').write(d); sys.exit(0 if 'MODULE_DEVICE_TABLE(of, rknpu_of_match)' in d else 1)"
+
+        # Keep NPU genpd (power-domain) devices always-on after probe.
+        # On mainline RK3588, pm_runtime_resume_and_get() on these virtual
+        # devices triggers a SCMI power-domain-on call into ATF at ioctl
+        # time (after probe's rknpu_power_off suspends them).  The ATF on
+        # Turing RK1 (and likely all mainline RK3588 boards) crashes at
+        # EL3 when this SCMI call is made at runtime — no kernel panic,
+        # system hangs, requires BMC reset.  Fix: call pm_runtime_get_noresume()
+        # on each genpd virtual device immediately after attachment to keep
+        # its usage count ≥1 forever, preventing pm_runtime_put_sync() in
+        # rknpu_power_off() from ever suspending the power domain.
+        python3 -c "
+import sys
+d = open('src/rknpu_drv.c').read()
+old = (
+    '\t\tvirt_dev = dev_pm_domain_attach_by_name(dev, \"npu0\");\n'
+    '\t\tif (!IS_ERR(virt_dev))\n'
+    '\t\t\trknpu_dev->genpd_dev_npu0 = virt_dev;\n'
+    '\t\tvirt_dev = dev_pm_domain_attach_by_name(dev, \"npu1\");\n'
+    '\t\tif (!IS_ERR(virt_dev))\n'
+    '\t\t\trknpu_dev->genpd_dev_npu1 = virt_dev;\n'
+    '\t\tif (config->num_irqs > 2) {\n'
+    '\t\t\tvirt_dev = dev_pm_domain_attach_by_name(dev, \"npu2\");\n'
+    '\t\t\tif (!IS_ERR(virt_dev))\n'
+    '\t\t\t\trknpu_dev->genpd_dev_npu2 = virt_dev;\n'
+    '\t\t}\n'
+    '\t\trknpu_dev->multiple_domains = true;\n'
+)
+new = (
+    '\t\tvirt_dev = dev_pm_domain_attach_by_name(dev, \"npu0\");\n'
+    '\t\tif (!IS_ERR(virt_dev)) {\n'
+    '\t\t\trknpu_dev->genpd_dev_npu0 = virt_dev;\n'
+    '\t\t\tpm_runtime_get_noresume(virt_dev);\n'
+    '\t\t}\n'
+    '\t\tvirt_dev = dev_pm_domain_attach_by_name(dev, \"npu1\");\n'
+    '\t\tif (!IS_ERR(virt_dev)) {\n'
+    '\t\t\trknpu_dev->genpd_dev_npu1 = virt_dev;\n'
+    '\t\t\tpm_runtime_get_noresume(virt_dev);\n'
+    '\t\t}\n'
+    '\t\tif (config->num_irqs > 2) {\n'
+    '\t\t\tvirt_dev = dev_pm_domain_attach_by_name(dev, \"npu2\");\n'
+    '\t\t\tif (!IS_ERR(virt_dev)) {\n'
+    '\t\t\t\trknpu_dev->genpd_dev_npu2 = virt_dev;\n'
+    '\t\t\t\tpm_runtime_get_noresume(virt_dev);\n'
+    '\t\t\t}\n'
+    '\t\t}\n'
+    '\t\trknpu_dev->multiple_domains = true;\n'
+)
+assert old in d, 'PATCH FAILED: source pattern not found'
+d = d.replace(old, new, 1)
+open('src/rknpu_drv.c', 'w').write(d)
+sys.exit(0 if 'pm_runtime_get_noresume(virt_dev)' in d else 1)
+"
     build:
       - |
         # Build rknpu.ko against the Talos kernel source.

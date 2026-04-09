@@ -2,3 +2,8 @@
 # Create /dev/rknpu with world-read/write so the CDI device plugin can expose
 # it to containers without requiring privileged: true.
 KERNEL=="rknpu", MODE="0666", TAG+="uaccess"
+
+# DMA-BUF heap: required for zero-copy CPU↔NPU buffer allocation (librknnrt.so).
+# The kernel creates /dev/dma_heap/system with mode 0600 by default; override to
+# 0666 so unprivileged containers can access it via CDI injection.
+SUBSYSTEM=="dma_heap", KERNEL=="system", MODE="0666", TAG+="uaccess"
