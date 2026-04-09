@@ -1,22 +1,25 @@
 ---
 # RK3588 NPU Device Plugin DaemonSet
 #
-# Runs on every node that has /dev/rknpu (i.e. nodes with the rockchip-rknpu
-# system extension loaded).  Registers rockchip.com/npu with the kubelet and
-# writes the CDI spec to /var/run/cdi/rockchip-npu.yaml so containerd can
-# inject /dev/rknpu and librknnrt.so into requesting containers.
+# Runs on every node labeled rockchip.com/npu-capable=true.
+# Discovers the NPU DRM device nodes dynamically via sysfs:
+#   /sys/bus/platform/drivers/rknpu/fdab0000.rknpu/drm/
+# Registers rockchip.com/npu with the kubelet and writes the CDI spec to
+# /var/run/cdi/rockchip-npu.yaml so containerd injects the DRM render node,
+# card node, dma_heap, and librknnrt.so into requesting containers.
+#
+# Label NPU-capable nodes before deploying:
+#   kubectl label node <node-name> rockchip.com/npu-capable=true
 #
 # Usage in a pod:
-#   resources:
-#     limits:
-#       rockchip.com/npu: "1"
-#   securityContext:
-#     procMount: Unmasked   # container-level — unmasks /proc/device-tree
-#   # Pod-level:
-#   # spec:
-#   #   hostUsers: false
-#   #   securityContext:
-#   #     procMount: Unmasked  ← wrong; procMount is container-level only
+#   spec:
+#     hostUsers: false
+#     containers:
+#       - securityContext:
+#           procMount: Unmasked
+#         resources:
+#           limits:
+#             rockchip.com/npu: "1"
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -38,9 +41,6 @@ spec:
         - operator: Exists
           effect: NoSchedule
 
-      # Only schedule on nodes that actually have the NPU device.
-      # Talos nodes with the rockchip-rknpu extension loaded will expose /dev/rknpu;
-      # add a node label "rockchip.com/npu=true" via Talos machine config or manually.
       nodeSelector:
         kubernetes.io/arch: arm64
 
@@ -49,17 +49,16 @@ spec:
           requiredDuringSchedulingIgnoredDuringExecution:
             nodeSelectorTerms:
               - matchExpressions:
-                  - key: rockchip.com/npu
+                  - key: rockchip.com/npu-capable
                     operator: In
                     values: ["true"]
 
       containers:
         - name: rk3588-npu-device-plugin
-          image: ghcr.io/schwankner/rk3588-npu-device-plugin:latest
+          image: ghcr.io/schwankner/rk3588-npu-device-plugin:v0.2.0
           imagePullPolicy: Always
 
           securityContext:
-            # Needs access to kubelet socket and /dev/rknpu — no broad privileges.
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities:
@@ -78,6 +77,9 @@ spec:
               mountPath: /var/lib/kubelet/device-plugins
             - name: dev
               mountPath: /dev
+            - name: sys
+              mountPath: /sys
+              readOnly: true
             - name: cdi
               mountPath: /var/run/cdi
             - name: lib
@@ -92,6 +94,10 @@ spec:
         - name: dev
           hostPath:
             path: /dev
+            type: Directory
+        - name: sys
+          hostPath:
+            path: /sys
             type: Directory
         - name: cdi
           hostPath:

@@ -705,25 +705,62 @@ creates device nodes under `/dev/dri/`. The actual device nodes are:
 /dev/dri/renderD129  — DRM render node (the one to mount into NPU inference containers)
 ```
 
-The exact minor numbers (`card1`, `renderD129`) depend on what other DRM devices are registered
-first. On Turing RK1, the display controller enumerates as `card0`/`renderD128`, so the NPU
-lands on `card1`/`renderD129`. This numbering is stable across reboots as long as the DT and
-module load order do not change.
+The exact minor numbers depend on what other DRM devices are registered first. On Turing RK1
+running headless (no display), the NPU is the first DRM device and gets `card0`/`renderD128`.
+This numbering is stable across reboots as long as the DT and module load order do not change,
+but should not be hardcoded.
+
+Note: the platform driver name as registered by w568w/rknpu-module is `RKNPU` (uppercase). The
+sysfs path therefore uses uppercase:
+```bash
+ls /sys/bus/platform/drivers/RKNPU/fdab0000.rknpu/drm/
+# → card0  renderD128   (headless Turing RK1)
+```
 
 **Affected items:**
 - `rockchip-rknpu` extension udev rule (Bug 3): the rule for `/dev/rknpu` never fires because
   the misc device is never created. The DRM device has its own udev rule (built into udev).
-- CDI device plugin: must expose `/dev/dri/renderD129` (and `/dev/dri/card1`), not `/dev/rknpu`.
+- CDI device plugin: must expose `/dev/dri/renderD128` (and `/dev/dri/card0`), not `/dev/rknpu`.
 - RKNN Toolkit / librknnrt.so: verifies the device by reading the rknpu version via DRM ioctl on
   the render node, not via a misc device open. The library works with the DRM render node.
 
-**Solution:** Update CDI device spec and device plugin to use `/dev/dri/renderD129`. To detect
-the correct render node at runtime, scan `/sys/bus/platform/drivers/rknpu/` for the bound device
-and follow the symlink to find its DRM minor:
-```bash
-ls /sys/bus/platform/drivers/rknpu/fdab0000.rknpu/drm/
-# → card1  renderD129
+**Solution:** Update CDI device spec and device plugin to dynamically discover the render node
+from sysfs at runtime. The device plugin scans
+`/sys/bus/platform/drivers/RKNPU/fdab0000.rknpu/drm/` for entries starting with `renderD` and
+`card`, then constructs `/dev/dri/<name>`. This handles any minor-number assignment.
+
+---
+
+## Bug 23: hostUsers: false fails — user namespaces disabled (max_user_namespaces=0)
+
+**Symptom:** Pod with `spec.hostUsers: false` stuck in `ContainerCreating`:
 ```
+failed to start noop process for unshare: fork/exec /proc/self/exe: no space left on device
+```
+
+**Root cause:** `/proc/sys/user/max_user_namespaces` is 0 on the Talos node. User namespaces are
+needed for `hostUsers: false`, which is in turn needed for `procMount: Unmasked` to work (making
+`/proc/device-tree/compatible` readable without `privileged: true`). The "no space left on
+device" error is the kernel's way of refusing a `clone(CLONE_NEWUSER)` call when the limit is 0.
+
+**Fix:** Add to the Talos machine config:
+```yaml
+machine:
+  sysctls:
+    user.max_user_namespaces: "63359"
+```
+
+Apply with `talosctl patch mc` and reboot. The value 63359 matches the default in most
+distributions that enable user namespaces.
+
+**Verification:**
+```bash
+talosctl read /proc/sys/user/max_user_namespaces
+# → 63359
+```
+
+Then a pod with `hostUsers: false` and `securityContext.procMount: Unmasked` starts normally and
+`/proc/device-tree/compatible` is readable inside the container.
 
 ---
 

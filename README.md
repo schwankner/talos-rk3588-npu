@@ -202,10 +202,9 @@ the NPU as a **DRM device**, not a misc character device:
 | `/dev/dri/renderD129` | DRM render node — mount this into inference containers |
 | `/dev/dri/card1` | DRM master node |
 
-The exact minor numbers depend on probe order; on Turing RK1 the display controller
-enumerates first (`card0`/`renderD128`), placing the NPU at `card1`/`renderD129`.
+The exact minor numbers depend on probe order and vary by board configuration.
 The device plugin discovers the correct node at runtime via
-`/sys/bus/platform/drivers/rknpu/fdab0000.rknpu/drm/`.
+`/sys/bus/platform/drivers/RKNPU/fdab0000.rknpu/drm/` — do not hardcode the minor number.
 
 ## Known Issues
 
