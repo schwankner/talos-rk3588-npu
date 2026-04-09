@@ -1,0 +1,35 @@
+---
+# RKNN NPU benchmark Job
+# Runs 200 ResNet18 inferences on the RK3588 NPU via CDI injection.
+# CDI provides: /dev/dri/renderD128, /dev/dri/card0, /usr/lib/librknnrt.so
+#
+# Expected result: ~100-300 fps (< 10 ms/inference)
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: rknn-bench-npu
+  namespace: default
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      hostUsers: false
+      containers:
+        - name: bench
+          image: ghcr.io/schwankner/rknn-bench:v1
+          imagePullPolicy: Always
+          args: ["--mode", "npu", "--iterations", "200"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            procMount: Unmasked
+          resources:
+            limits:
+              rockchip.com/npu: "1"
+              cpu: "2"
+              memory: 512Mi
+            requests:
+              cpu: "1"
+              memory: 256Mi
