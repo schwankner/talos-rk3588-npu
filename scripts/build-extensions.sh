@@ -201,7 +201,9 @@ case "${TARGET}" in
     rknpu)      build_rknpu ;;
     rknn-libs)  build_rknn_libs ;;
     all)
-        build_kernel
+        # build_kernel is omitted: the kernel is compiled as a dependency inside
+        # build_rknpu and build_rknn_libs.  Pushing a standalone kernel image
+        # requires separate GHCR package write permissions not held by this repo.
         build_rknpu
         build_rknn_libs
         ;;
