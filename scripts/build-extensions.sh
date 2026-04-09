@@ -92,8 +92,12 @@ setup_pkgs_tree() {
         [[ "${line}" =~ ^[[:space:]]*# ]] && continue
         [[ -z "${line// }" ]] && continue
         key="${line%%=*}"
-        # Remove existing setting (active "KEY=..." or disabled "# KEY is not set")
-        sed -i "/^${key}[= ]/d; s/^# ${key} is not set$//" "${pkgs_config}"
+        # Remove existing setting (active "KEY=..." or disabled "# KEY is not set").
+        # Use a temp-file replacement instead of sed -i for macOS/BSD compatibility.
+        local tmp
+        tmp="$(mktemp)"
+        grep -v "^${key}[= ]\|^# ${key} is not set$" "${pkgs_config}" > "${tmp}" || true
+        mv "${tmp}" "${pkgs_config}"
         echo "${line}" >> "${pkgs_config}"
     done < "${fragment}"
     log "Kernel config fragment applied."
