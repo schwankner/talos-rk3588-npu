@@ -144,12 +144,11 @@ func writeCDISpec(nodes npuNodes) error {
 		)
 	}
 
-	// DMA heap — rknpu uses dma_buf for zero-copy host↔NPU transfers.
-	if _, err := os.Stat("/dev/dma_heap/system"); err == nil {
-		edits.DeviceNodes = append(edits.DeviceNodes,
-			deviceNode{Path: "/dev/dma_heap/system", Permissions: "rw"},
-		)
-	}
+	// dma_heap is intentionally omitted from CDI deviceNodes.
+	// CDI creates device nodes via mknod (not bind-mount), which produces mode
+	// 0600 owned by uid 65534 (host uid 0 is unmapped in user namespaces) —
+	// that blocks O_RDWR. Instead, dma_heap is exposed via the kubelet DeviceSpec
+	// in Allocate(), which bind-mounts from the host and preserves the 0666 mode.
 
 	// librknnrt.so — installed by rockchip-rknn-libs Talos extension.
 	// Bind-mount into the container so the application does not need to bundle it.
@@ -240,7 +239,10 @@ func (p *npuPlugin) Allocate(_ context.Context, req *v1beta1.AllocateRequest) (*
 			// CDI path: containerd reads /var/run/cdi/rockchip-npu.yaml and injects
 			// the full device list (render node, card node, dma_heap, librknnrt.so).
 			CDIDevices: []*v1beta1.CDIDevice{{Name: cdiDeviceRef}},
-			// Fallback for runtimes without CDI support.
+			// DeviceSpec: kubelet uses this to bind-mount device nodes into the
+			// container and add them to the cgroupv2 device eBPF allowlist.
+			// We list all three device nodes here so kubelet handles cgroup access
+			// regardless of whether CDI is fully functional.
 			Devices: []*v1beta1.DeviceSpec{
 				{HostPath: nodes.renderNode, ContainerPath: nodes.renderNode, Permissions: "rw"},
 			},
@@ -248,6 +250,16 @@ func (p *npuPlugin) Allocate(_ context.Context, req *v1beta1.AllocateRequest) (*
 		if nodes.cardNode != "" {
 			cr.Devices = append(cr.Devices, &v1beta1.DeviceSpec{
 				HostPath: nodes.cardNode, ContainerPath: nodes.cardNode, Permissions: "rw",
+			})
+		}
+		// dma_heap: librknnrt.so uses dma_buf for zero-copy CPU↔NPU transfers.
+		// Include it in DeviceSpec (not just CDI) so kubelet handles the cgroup
+		// device allowlist — CDI alone leaves the file mode wrong (mknod vs bind).
+		if _, err := os.Stat("/dev/dma_heap/system"); err == nil {
+			cr.Devices = append(cr.Devices, &v1beta1.DeviceSpec{
+				HostPath:      "/dev/dma_heap/system",
+				ContainerPath: "/dev/dma_heap/system",
+				Permissions:   "rw",
 			})
 		}
 		resp.ContainerResponses = append(resp.ContainerResponses, cr)
@@ -343,6 +355,15 @@ func main() {
 		log.Fatalf("rknpu device not found after 60 s: %v", err)
 	}
 	log.Printf("Discovered NPU: render=%s card=%s", nodes.renderNode, nodes.cardNode)
+
+	// The kernel creates /dev/dma_heap/system with mode 0600. The udev rule in
+	// the rockchip-rknpu extension overrides this to 0666, but until the extension
+	// is rebuilt we set it here. Running as uid 0 (file owner) so no CAP_FOWNER needed.
+	if err := os.Chmod("/dev/dma_heap/system", 0o666); err != nil {
+		log.Printf("Warning: chmod /dev/dma_heap/system: %v (device may be inaccessible in user-namespace pods)", err)
+	} else {
+		log.Println("chmod 0666 /dev/dma_heap/system")
+	}
 
 	if err := writeCDISpec(nodes); err != nil {
 		log.Fatalf("Failed to write CDI spec: %v", err)
