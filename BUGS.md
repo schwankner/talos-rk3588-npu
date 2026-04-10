@@ -887,6 +887,38 @@ Applied in `rockchip-rknpu/pkg.yaml` as a Python source patch during extension b
 
 ---
 
+## Bug 33: node crashes at first DRM ioctl — genpd_runtime_resume at runtime after autosuspend
+
+**Symptom:** Node hard-hangs within ~5 seconds of any NPU bench pod starting (with all
+Bugs 25–32 applied, installer-v1.12.6). Simple `open("/dev/dri/renderD128")` does not crash;
+crash requires a DRM ioctl (e.g. `DRM_IOCTL_RKNPU_QUERY_CAP` from librknnrt.so).
+
+**Root cause:** Bug 32's `pm_runtime_get_sync(dev)` is inserted at the start of the
+pm_runtime setup block in probe. However, the original probe code immediately follows with
+`pm_runtime_put_autosuspend(dev)`, which decrements the usage count from 1 back to 0 and
+schedules autosuspend (~2 s). When autosuspend fires:
+1. `rknpu_runtime_suspend` → `rknpu_power_off` [Bug 31: no-op], device → RPM_SUSPENDED.
+2. genpd sees the device as RPM_SUSPENDED → `genpd_power_off()` returns -EBUSY is NOT
+   reached (device IS suspended) → `rockchip_pd_power_off()` → PMU writes → NPU domain OFF.
+3. When librknnrt.so calls a DRM ioctl, the ioctl path calls `pm_runtime_get_sync(dev)`.
+   Device is RPM_SUSPENDED → `genpd_runtime_resume()` → `rockchip_pd_power_on()`.
+   On this particular path (runtime resume, NOT probe-time), the SCMI/ATF handling
+   crashes: the system hard-hangs and requires a BMC reset.
+
+**Why `open()` doesn't crash:** `rknpu_drm_open` does not call `pm_runtime_get_sync`.
+The device open merely registers the DRM file; no genpd resume happens. The first ioctl
+IS what triggers the PM runtime resume.
+
+**Solution (Bug 33):** Add `pm_runtime_get_noresume(dev)` immediately after Bug 32's
+`pm_runtime_get_sync(dev)`. This bumps the usage count to 2 before the probe's
+`pm_runtime_put_autosuspend` runs. The put decrements to 1 (not 0), so no autosuspend
+is ever scheduled. The device remains RPM_ACTIVE permanently, the genpd domain stays on,
+and no `genpd_runtime_resume` call is ever made at ioctl time.
+
+**Applied in:** `rockchip-rknpu/pkg.yaml` (Bug 33 Python source patch, after Bug 32 patch).
+
+---
+
 ## Bug 32: node crashes at build_graph() despite Bugs 25–31 — NPU power domain off
 
 **Symptom:** Node still hard-hangs immediately when `build_graph()` → RKNPU_SUBMIT ioctl

@@ -62,7 +62,7 @@ steps:
         python3 -c "import base64,sys; exec(base64.b64decode(b'aW1wb3J0IHN5cwpkID0gb3Blbignc3JjL3JrbnB1X2Rydi5jJykucmVhZCgpCm9sZCA9ICgKICAgICdcdFx0dmlydF9kZXYgPSBkZXZfcG1fZG9tYWluX2F0dGFjaF9ieV9uYW1lKGRldiwgIm5wdTAiKTtcbicKICAgICdcdFx0aWYgKCFJU19FUlIodmlydF9kZXYpKVxuJwogICAgJ1x0XHRcdHJrbnB1X2Rldi0+Z2VucGRfZGV2X25wdTAgPSB2aXJ0X2RldjtcbicKICAgICdcdFx0dmlydF9kZXYgPSBkZXZfcG1fZG9tYWluX2F0dGFjaF9ieV9uYW1lKGRldiwgIm5wdTEiKTtcbicKICAgICdcdFx0aWYgKCFJU19FUlIodmlydF9kZXYpKVxuJwogICAgJ1x0XHRcdHJrbnB1X2Rldi0+Z2VucGRfZGV2X25wdTEgPSB2aXJ0X2RldjtcbicKICAgICdcdFx0aWYgKGNvbmZpZy0+bnVtX2lycXMgPiAyKSB7XG4nCiAgICAnXHRcdFx0dmlydF9kZXYgPSBkZXZfcG1fZG9tYWluX2F0dGFjaF9ieV9uYW1lKGRldiwgIm5wdTIiKTtcbicKICAgICdcdFx0XHRpZiAoIUlTX0VSUih2aXJ0X2RldikpXG4nCiAgICAnXHRcdFx0XHRya25wdV9kZXYtPmdlbnBkX2Rldl9ucHUyID0gdmlydF9kZXY7XG4nCiAgICAnXHRcdH1cbicKICAgICdcdFx0cmtucHVfZGV2LT5tdWx0aXBsZV9kb21haW5zID0gdHJ1ZTtcbicKKQpuZXcgPSAoCiAgICAnXHRcdHZpcnRfZGV2ID0gZGV2X3BtX2RvbWFpbl9hdHRhY2hfYnlfbmFtZShkZXYsICJucHUwIik7XG4nCiAgICAnXHRcdGlmICghSVNfRVJSKHZpcnRfZGV2KSkge1xuJwogICAgJ1x0XHRcdHJrbnB1X2Rldi0+Z2VucGRfZGV2X25wdTAgPSB2aXJ0X2RldjtcbicKICAgICdcdFx0XHRwbV9ydW50aW1lX2dldF9ub3Jlc3VtZSh2aXJ0X2Rldik7XG4nCiAgICAnXHRcdH1cbicKICAgICdcdFx0dmlydF9kZXYgPSBkZXZfcG1fZG9tYWluX2F0dGFjaF9ieV9uYW1lKGRldiwgIm5wdTEiKTtcbicKICAgICdcdFx0aWYgKCFJU19FUlIodmlydF9kZXYpKSB7XG4nCiAgICAnXHRcdFx0cmtucHVfZGV2LT5nZW5wZF9kZXZfbnB1MSA9IHZpcnRfZGV2O1xuJwogICAgJ1x0XHRcdHBtX3J1bnRpbWVfZ2V0X25vcmVzdW1lKHZpcnRfZGV2KTtcbicKICAgICdcdFx0fVxuJwogICAgJ1x0XHRpZiAoY29uZmlnLT5udW1faXJxcyA+IDIpIHtcbicKICAgICdcdFx0XHR2aXJ0X2RldiA9IGRldl9wbV9kb21haW5fYXR0YWNoX2J5X25hbWUoZGV2LCAibnB1MiIpO1xuJwogICAgJ1x0XHRcdGlmICghSVNfRVJSKHZpcnRfZGV2KSkge1xuJwogICAgJ1x0XHRcdFx0cmtucHVfZGV2LT5nZW5wZF9kZXZfbnB1MiA9IHZpcnRfZGV2O1xuJwogICAgJ1x0XHRcdFx0cG1fcnVudGltZV9nZXRfbm9yZXN1bWUodmlydF9kZXYpO1xuJwogICAgJ1x0XHRcdH1cbicKICAgICdcdFx0fVxuJwogICAgJ1x0XHRya25wdV9kZXYtPm11bHRpcGxlX2RvbWFpbnMgPSB0cnVlO1xuJwopCmFzc2VydCBvbGQgaW4gZCwgJ1BBVENIIEZBSUxFRDogc291cmNlIHBhdHRlcm4gbm90IGZvdW5kJwpkID0gZC5yZXBsYWNlKG9sZCwgbmV3LCAxKQpvcGVuKCdzcmMvcmtucHVfZHJ2LmMnLCAndycpLndyaXRlKGQpCnN5cy5leGl0KDAgaWYgJ3BtX3J1bnRpbWVfZ2V0X25vcmVzdW1lKHZpcnRfZGV2KScgaW4gZCBlbHNlIDEpCg==').decode())"
 
         # Bug 26 / Bug 32: power on the NPU's genpd domain during probe via
-        # pm_runtime_get_sync(dev), and keep it on permanently.
+        # pm_runtime_get_sync(dev), keeping the device RPM_ACTIVE.
         #
         # Root cause (Bug 32): genpd_sync_power_off() fires after rknpu probes
         # (triggered by sync_state() for fdab0000.npu).  It powers off the NPU
@@ -73,14 +73,27 @@ steps:
         # pm_runtime_get_sync(dev) resumes the device through genpd:
         #   genpd_runtime_resume() → rockchip_pd_power_on() → PMU writes →
         #   NPU top power domain ON → dev->power.runtime_status = RPM_ACTIVE.
-        # With status RPM_ACTIVE, genpd_power_off() returns -EBUSY and the
-        # domain is never powered off again.  Combined with Bug 31 (power_off
-        # no-op), the domain stays on for the lifetime of the driver.
         #
         # Note: this is also called before multiple_domains genpd attachment,
         # so it resumes the device via its DT power-domain (<&power PD_NPU>),
         # which is enough for non-iommu mode (single fdab0000.rknpu device).
         python3 -c "import base64,sys; exec(base64.b64decode(b'aW1wb3J0IHN5cwpkID0gb3Blbignc3JjL3JrbnB1X2Rydi5jJykucmVhZCgpCm9sZCA9ICdcdHBtX3J1bnRpbWVfZW5hYmxlKGRldik7XG4nCm5ldyA9ICdcdHBtX3J1bnRpbWVfZW5hYmxlKGRldik7XG5cdHBtX3J1bnRpbWVfZ2V0X3N5bmMoZGV2KTtcbicKYXNzZXJ0IG9sZCBpbiBkLCAnUEFUQ0ggRkFJTEVEOiBwbV9ydW50aW1lX2VuYWJsZSBwYXR0ZXJuIG5vdCBmb3VuZCcKZCA9IGQucmVwbGFjZShvbGQsIG5ldywgMSkKb3Blbignc3JjL3JrbnB1X2Rydi5jJywgJ3cnKS53cml0ZShkKQpzeXMuZXhpdCgwIGlmICdcdHBtX3J1bnRpbWVfZ2V0X3N5bmMoZGV2KTtcbicgaW4gZCBlbHNlIDEpCg==').decode())"
+
+        # Bug 33: prevent probe's pm_runtime_put_autosuspend from undoing Bug 32.
+        # After pm_runtime_get_sync (Bug 32) sets usage=1 and status=RPM_ACTIVE,
+        # the original probe calls pm_runtime_put_autosuspend, which decrements
+        # usage to 0 and schedules autosuspend.  When autosuspend fires (~2 s
+        # after probe), rknpu_runtime_suspend → rknpu_power_off [Bug 31: no-op],
+        # but the device transitions to RPM_SUSPENDED.  The genpd then powers
+        # off the NPU domain (rockchip_pd_power_off → SCMI to ATF).  The next
+        # DRM ioctl calls pm_runtime_get_sync(dev), triggering genpd_runtime_resume
+        # → rockchip_pd_power_on → SCMI to ATF at runtime → system crash.
+        #
+        # Fix: add pm_runtime_get_noresume(dev) immediately after get_sync to
+        # bump usage to 2.  The probe's put_autosuspend decrements to 1 (not 0),
+        # so autosuspend is never scheduled and the device stays RPM_ACTIVE
+        # permanently.  No genpd power transitions happen after probe.
+        python3 -c "import base64,sys; exec(base64.b64decode(b'aW1wb3J0IHN5cwpkID0gb3Blbignc3JjL3JrbnB1X2Rydi5jJykucmVhZCgpCm9sZCA9ICgnXHRwbV9ydW50aW1lX2VuYWJsZShkZXYpO1xuJydcdHBtX3J1bnRpbWVfZ2V0X3N5bmMoZGV2KTtcbicpCm5ldyA9ICgnXHRwbV9ydW50aW1lX2VuYWJsZShkZXYpO1xuJydcdHBtX3J1bnRpbWVfZ2V0X3N5bmMoZGV2KTtcbicnXHRwbV9ydW50aW1lX2dldF9ub3Jlc3VtZShkZXYpOyAvKiBCdWcgMzM6IHBlcm1hbmVudCByZWYsIGtlZXBzIE5QVSBkb21haW4gYWx3YXlzLW9uICovXG4nKQphc3NlcnQgb2xkIGluIGQsICdQQVRDSCBGQUlMRUQ6IHBtX3J1bnRpbWVfZ2V0X3N5bmMgcGF0dGVybiBub3QgZm91bmQnCmQgPSBkLnJlcGxhY2Uob2xkLCBuZXcsIDEpCm9wZW4oJ3NyYy9ya25wdV9kcnYuYycsICd3Jykud3JpdGUoZCkKc3lzLmV4aXQoMCBpZiAncG1fcnVudGltZV9nZXRfbm9yZXN1bWUoZGV2KScgaW4gZCBlbHNlIDEpCg==').decode())"
 
         # Disable entire rknpu devfreq subsystem (Bug 28 + Bug 29).
         # rknpu_devfreq_init() registers the rknpu_ondemand devfreq governor which fires
