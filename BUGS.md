@@ -887,6 +887,35 @@ Applied in `rockchip-rknpu/pkg.yaml` as a Python source patch during extension b
 
 ---
 
+## Bug 30: node crashes at build_graph() despite Bugs 25–29 — pm_runtime SCMI at runtime
+
+**Symptom:** After applying all of Bugs 25–29, the node still crashes within ~5 seconds of
+the bench pod starting.  `rknpu_power_on()` is called from the first ioctl (`build_graph`),
+which calls `pm_runtime_resume_and_get()` on each of the three genpd virtual devices (npu0,
+npu1, npu2) and `pm_runtime_get_sync()` on the main NPU device.  Despite Bug 25 keeping
+genpd device usage counts ≥1 (status=RPM_ACTIVE after probe) and Bug 26 keeping the main
+device usage count ≥1, these calls still issue SCMI power-domain SMCs into ATF at EL3.
+
+**Root cause:** Even with RPM_ACTIVE status, `pm_runtime_resume_and_get()` and
+`pm_runtime_get_sync()` on genpd-backed devices can trigger the rockchip power-domain
+resume path under certain race conditions (e.g. `sync_state()` interactions with the power
+domain controller).  The root cause is that ANY SCMI call from the rknpu driver at runtime
+into the Turing RK1 ATF causes a hard hang — the ATF firmware does not handle runtime SCMI
+power-domain transitions from the NPU driver after the initial probe window.
+
+**Solution:** Remove ALL pm_runtime/genpd calls from `rknpu_power_on()` and
+`rknpu_power_off()`.  The power domains are permanently anchored by:
+- Bug 25: `pm_runtime_get_noresume(virt_dev)` per genpd device (count ≥1 forever)
+- Bug 26: `pm_runtime_get_noresume(dev)` after `pm_runtime_enable` (count ≥1 forever)
+- Probe's `rknpu_power_on()` calls still run the full PM path to initially power on hardware
+
+At runtime, `rknpu_power_on/off` becomes clocks-only (+ regulators).  No pm_runtime ops,
+no genpd resume/suspend, no SCMI.  The hardware stays powered on permanently.
+
+Applied in `rockchip-rknpu/pkg.yaml` as a Python source patch.
+
+---
+
 ## Bug 29: node crashes 30-45s after boot — devfreq initialization SCMI paths
 
 **Symptom:** After applying Bugs 25–28, the node crashes spontaneously 30–45 seconds after
