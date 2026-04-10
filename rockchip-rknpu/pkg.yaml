@@ -80,7 +80,7 @@ steps:
         # Note: this is also called before multiple_domains genpd attachment,
         # so it resumes the device via its DT power-domain (<&power PD_NPU>),
         # which is enough for non-iommu mode (single fdab0000.rknpu device).
-        python3 -c "import base64,sys; exec(base64.b64decode(b'aW1wb3J0IHN5cwpkID0gb3Blbignc3JjL3JrbnB1X2Rydi5jJykucmVhZCgpCm9sZCA9ICcJcG1fcnVudGltZV9lbmFibGUoZGV2KTsKJwpuZXcgPSAnCXBtX3J1bnRpbWVfZW5hYmxlKGRldik7CglwbV9ydW50aW1lX2dldF9zeW5jKGRldik7CicKYXNzZXJ0IG9sZCBpbiBkLCAnUEFUQ0ggRkFJTEVEOiBwbV9ydW50aW1lX2VuYWJsZSBwYXR0ZXJuIG5vdCBmb3VuZCcKZCA9IGQucmVwbGFjZShvbGQsIG5ldywgMSkKb3Blbignc3JjL3JrbnB1X2Rydi5jJywgJ3cnKS53cml0ZShkKQpzeXMuZXhpdCgwIGlmICcJcG1fcnVudGltZV9nZXRfc3luYyhkZXYpOwonIGluIGQgZWxzZSAxKQo=').decode())"
+        python3 -c "import base64,sys; exec(base64.b64decode(b'aW1wb3J0IHN5cwpkID0gb3Blbignc3JjL3JrbnB1X2Rydi5jJykucmVhZCgpCm9sZCA9ICdcdHBtX3J1bnRpbWVfZW5hYmxlKGRldik7XG4nCm5ldyA9ICdcdHBtX3J1bnRpbWVfZW5hYmxlKGRldik7XG5cdHBtX3J1bnRpbWVfZ2V0X3N5bmMoZGV2KTtcbicKYXNzZXJ0IG9sZCBpbiBkLCAnUEFUQ0ggRkFJTEVEOiBwbV9ydW50aW1lX2VuYWJsZSBwYXR0ZXJuIG5vdCBmb3VuZCcKZCA9IGQucmVwbGFjZShvbGQsIG5ldywgMSkKb3Blbignc3JjL3JrbnB1X2Rydi5jJywgJ3cnKS53cml0ZShkKQpzeXMuZXhpdCgwIGlmICdcdHBtX3J1bnRpbWVfZ2V0X3N5bmMoZGV2KTtcbicgaW4gZCBlbHNlIDEpCg==').decode())"
 
         # Disable entire rknpu devfreq subsystem (Bug 28 + Bug 29).
         # rknpu_devfreq_init() registers the rknpu_ondemand devfreq governor which fires
