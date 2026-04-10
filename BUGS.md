@@ -887,6 +887,41 @@ Applied in `rockchip-rknpu/pkg.yaml` as a Python source patch during extension b
 
 ---
 
+## Bug 32: node crashes at build_graph() despite Bugs 25–31 — NPU power domain off
+
+**Symptom:** Node still hard-hangs immediately when `build_graph()` → RKNPU_SUBMIT ioctl
+is called, even with all prior SCMI patches applied. Confirmed via step-by-step isolation:
+RKNNRuntime() constructor = safe, `build_graph()` = immediate hard hang.
+
+**Root cause:** The NPU power domain (`<&power PD_NPU>`, managed by `rockchip-pm-domain`
+at `fd8d8000`) is powered off by the genpd framework BEFORE or shortly AFTER rknpu loads.
+The mechanism:
+1. `genpd_sync_power_off()` fires from `sync_state()` for `fdab0000.npu` after rknpu probes.
+2. It calls `genpd_power_off()`, which checks `pm_runtime_suspended(dev)` for each consumer.
+3. Bug 26's `pm_runtime_get_noresume(dev)` only increments `usage_count`; it leaves
+   `dev->power.runtime_status = RPM_SUSPENDED`. `genpd_power_off()` sees the device as
+   suspended → domain CAN be powered off → `rockchip_pd_power_off()` → PMU writes → domain OFF.
+4. With Bug 30 (no `pm_runtime_get_sync` in power_on), the domain is never powered back on.
+5. When the NPU job writes to MMIO (`base[0] + RKNPU_OFFSET_PC_OP_EN`), the bus access to the
+   powered-off domain causes an AXI lockup → CPU hangs waiting for a response that never comes.
+
+**Solution (Bug 32):** Change Bug 26's `pm_runtime_get_noresume(dev)` →
+`pm_runtime_get_sync(dev)` immediately after `pm_runtime_enable(dev)` in probe.
+`pm_runtime_get_sync(dev)` triggers `genpd_runtime_resume()` →
+`rockchip_pd_power_on()` (direct PMU register writes, no SCMI) → NPU domain ON →
+`dev->power.runtime_status = RPM_ACTIVE`. With status RPM_ACTIVE, `genpd_power_off()`
+returns -EBUSY and no subsequent sync_state call can power off the domain.
+Combined with Bug 31 (power_off no-op), the domain remains on for the driver's lifetime.
+
+**Key insight:** `genpd_runtime_resume()` for the NPU domain uses `rockchip_pd_power_on()`
+which writes to the PMU (non-secure, non-SCMI register writes). This is safe. The SCMI
+crashes in earlier bugs were from SCMI CLOCK operations (scmi_clk_npu enable/disable),
+not from power domain PM operations.
+
+**Fix location:** `pkg.yaml` Bug 26 patch: `pm_runtime_get_noresume` → `pm_runtime_get_sync`.
+
+---
+
 ## Bug 31: node crashes at first ioctl despite Bug 30 — regulator SCMI at runtime
 
 **Symptom:** After Bug 30, node still crashes within ~5 seconds of the bench pod starting.

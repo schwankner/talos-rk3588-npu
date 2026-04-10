@@ -61,16 +61,26 @@ steps:
         # rknpu_power_off() from ever suspending the power domain.
         python3 -c "import base64,sys; exec(base64.b64decode(b'aW1wb3J0IHN5cwpkID0gb3Blbignc3JjL3JrbnB1X2Rydi5jJykucmVhZCgpCm9sZCA9ICgKICAgICdcdFx0dmlydF9kZXYgPSBkZXZfcG1fZG9tYWluX2F0dGFjaF9ieV9uYW1lKGRldiwgIm5wdTAiKTtcbicKICAgICdcdFx0aWYgKCFJU19FUlIodmlydF9kZXYpKVxuJwogICAgJ1x0XHRcdHJrbnB1X2Rldi0+Z2VucGRfZGV2X25wdTAgPSB2aXJ0X2RldjtcbicKICAgICdcdFx0dmlydF9kZXYgPSBkZXZfcG1fZG9tYWluX2F0dGFjaF9ieV9uYW1lKGRldiwgIm5wdTEiKTtcbicKICAgICdcdFx0aWYgKCFJU19FUlIodmlydF9kZXYpKVxuJwogICAgJ1x0XHRcdHJrbnB1X2Rldi0+Z2VucGRfZGV2X25wdTEgPSB2aXJ0X2RldjtcbicKICAgICdcdFx0aWYgKGNvbmZpZy0+bnVtX2lycXMgPiAyKSB7XG4nCiAgICAnXHRcdFx0dmlydF9kZXYgPSBkZXZfcG1fZG9tYWluX2F0dGFjaF9ieV9uYW1lKGRldiwgIm5wdTIiKTtcbicKICAgICdcdFx0XHRpZiAoIUlTX0VSUih2aXJ0X2RldikpXG4nCiAgICAnXHRcdFx0XHRya25wdV9kZXYtPmdlbnBkX2Rldl9ucHUyID0gdmlydF9kZXY7XG4nCiAgICAnXHRcdH1cbicKICAgICdcdFx0cmtucHVfZGV2LT5tdWx0aXBsZV9kb21haW5zID0gdHJ1ZTtcbicKKQpuZXcgPSAoCiAgICAnXHRcdHZpcnRfZGV2ID0gZGV2X3BtX2RvbWFpbl9hdHRhY2hfYnlfbmFtZShkZXYsICJucHUwIik7XG4nCiAgICAnXHRcdGlmICghSVNfRVJSKHZpcnRfZGV2KSkge1xuJwogICAgJ1x0XHRcdHJrbnB1X2Rldi0+Z2VucGRfZGV2X25wdTAgPSB2aXJ0X2RldjtcbicKICAgICdcdFx0XHRwbV9ydW50aW1lX2dldF9ub3Jlc3VtZSh2aXJ0X2Rldik7XG4nCiAgICAnXHRcdH1cbicKICAgICdcdFx0dmlydF9kZXYgPSBkZXZfcG1fZG9tYWluX2F0dGFjaF9ieV9uYW1lKGRldiwgIm5wdTEiKTtcbicKICAgICdcdFx0aWYgKCFJU19FUlIodmlydF9kZXYpKSB7XG4nCiAgICAnXHRcdFx0cmtucHVfZGV2LT5nZW5wZF9kZXZfbnB1MSA9IHZpcnRfZGV2O1xuJwogICAgJ1x0XHRcdHBtX3J1bnRpbWVfZ2V0X25vcmVzdW1lKHZpcnRfZGV2KTtcbicKICAgICdcdFx0fVxuJwogICAgJ1x0XHRpZiAoY29uZmlnLT5udW1faXJxcyA+IDIpIHtcbicKICAgICdcdFx0XHR2aXJ0X2RldiA9IGRldl9wbV9kb21haW5fYXR0YWNoX2J5X25hbWUoZGV2LCAibnB1MiIpO1xuJwogICAgJ1x0XHRcdGlmICghSVNfRVJSKHZpcnRfZGV2KSkge1xuJwogICAgJ1x0XHRcdFx0cmtucHVfZGV2LT5nZW5wZF9kZXZfbnB1MiA9IHZpcnRfZGV2O1xuJwogICAgJ1x0XHRcdFx0cG1fcnVudGltZV9nZXRfbm9yZXN1bWUodmlydF9kZXYpO1xuJwogICAgJ1x0XHRcdH1cbicKICAgICdcdFx0fVxuJwogICAgJ1x0XHRya25wdV9kZXYtPm11bHRpcGxlX2RvbWFpbnMgPSB0cnVlO1xuJwopCmFzc2VydCBvbGQgaW4gZCwgJ1BBVENIIEZBSUxFRDogc291cmNlIHBhdHRlcm4gbm90IGZvdW5kJwpkID0gZC5yZXBsYWNlKG9sZCwgbmV3LCAxKQpvcGVuKCdzcmMvcmtucHVfZHJ2LmMnLCAndycpLndyaXRlKGQpCnN5cy5leGl0KDAgaWYgJ3BtX3J1bnRpbWVfZ2V0X25vcmVzdW1lKHZpcnRfZGV2KScgaW4gZCBlbHNlIDEpCg==').decode())"
 
-        # Keep the NPU device (fdab0000.rknpu) itself always-on after probe.
-        # rknpu_power_on() — called on every build_graph()/ioctl — ends with
-        # pm_runtime_get_sync(dev) on the NPU device itself.  If the device
-        # was suspended (by rknpu_power_off_delay_work after 3 s of idle),
-        # this triggers the NPU's own runtime_resume callback which issues
-        # another SCMI power-domain-on SMC into ATF at EL3 → same hang as
-        # Bug 25.  Fix: pm_runtime_get_noresume(dev) right after
-        # pm_runtime_enable(dev) in probe keeps usage count >=1 forever,
-        # so pm_runtime_put_sync(dev) in rknpu_power_off() never suspends it.
-        python3 -c "import base64,sys; exec(base64.b64decode(b'aW1wb3J0IHN5cwpkID0gb3Blbignc3JjL3JrbnB1X2Rydi5jJykucmVhZCgpCm9sZCA9ICdcdHBtX3J1bnRpbWVfZW5hYmxlKGRldik7XG4nCm5ldyA9ICdcdHBtX3J1bnRpbWVfZW5hYmxlKGRldik7XG5cdHBtX3J1bnRpbWVfZ2V0X25vcmVzdW1lKGRldik7XG4nCmFzc2VydCBvbGQgaW4gZCwgJ1BBVENIIEZBSUxFRDogcG1fcnVudGltZV9lbmFibGUgcGF0dGVybiBub3QgZm91bmQnCmQgPSBkLnJlcGxhY2Uob2xkLCBuZXcsIDEpCm9wZW4oJ3NyYy9ya25wdV9kcnYuYycsICd3Jykud3JpdGUoZCkKc3lzLmV4aXQoMCBpZiAnXHRwbV9ydW50aW1lX2dldF9ub3Jlc3VtZShkZXYpO1xuJyBpbiBkIGVsc2UgMSkK').decode())"
+        # Bug 26 / Bug 32: power on the NPU's genpd domain during probe via
+        # pm_runtime_get_sync(dev), and keep it on permanently.
+        #
+        # Root cause (Bug 32): genpd_sync_power_off() fires after rknpu probes
+        # (triggered by sync_state() for fdab0000.npu).  It powers off the NPU
+        # power domain when it finds the device in RPM_SUSPENDED state.  With
+        # the domain off, any write to NPU MMIO (e.g. PC_OP_EN in
+        # rknpu_job_subcore_commit_pc) causes an AXI bus lockup → hard hang.
+        #
+        # pm_runtime_get_sync(dev) resumes the device through genpd:
+        #   genpd_runtime_resume() → rockchip_pd_power_on() → PMU writes →
+        #   NPU top power domain ON → dev->power.runtime_status = RPM_ACTIVE.
+        # With status RPM_ACTIVE, genpd_power_off() returns -EBUSY and the
+        # domain is never powered off again.  Combined with Bug 31 (power_off
+        # no-op), the domain stays on for the lifetime of the driver.
+        #
+        # Note: this is also called before multiple_domains genpd attachment,
+        # so it resumes the device via its DT power-domain (<&power PD_NPU>),
+        # which is enough for non-iommu mode (single fdab0000.rknpu device).
+        python3 -c "import base64,sys; exec(base64.b64decode(b'aW1wb3J0IHN5cwpkID0gb3Blbignc3JjL3JrbnB1X2Rydi5jJykucmVhZCgpCm9sZCA9ICcJcG1fcnVudGltZV9lbmFibGUoZGV2KTsKJwpuZXcgPSAnCXBtX3J1bnRpbWVfZW5hYmxlKGRldik7CglwbV9ydW50aW1lX2dldF9zeW5jKGRldik7CicKYXNzZXJ0IG9sZCBpbiBkLCAnUEFUQ0ggRkFJTEVEOiBwbV9ydW50aW1lX2VuYWJsZSBwYXR0ZXJuIG5vdCBmb3VuZCcKZCA9IGQucmVwbGFjZShvbGQsIG5ldywgMSkKb3Blbignc3JjL3JrbnB1X2Rydi5jJywgJ3cnKS53cml0ZShkKQpzeXMuZXhpdCgwIGlmICcJcG1fcnVudGltZV9nZXRfc3luYyhkZXYpOwonIGluIGQgZWxzZSAxKQo=').decode())"
 
         # Disable entire rknpu devfreq subsystem (Bug 28 + Bug 29).
         # rknpu_devfreq_init() registers the rknpu_ondemand devfreq governor which fires
