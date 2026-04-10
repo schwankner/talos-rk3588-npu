@@ -201,9 +201,11 @@ case "${TARGET}" in
     rknpu)      build_rknpu ;;
     rknn-libs)  build_rknn_libs ;;
     all)
-        # build_kernel is omitted: the kernel is compiled as a dependency inside
-        # build_rknpu and build_rknn_libs.  Pushing a standalone kernel image
-        # requires separate GHCR package write permissions not held by this repo.
+        # build_kernel pushes a standalone talos-rk3588-kernel image that is
+        # required by build-installer.sh.  It reuses the kernel-build cache
+        # layer shared with build_rknpu, so no extra compile time is incurred
+        # when both are run in the same workflow.
+        build_kernel
         build_rknpu
         build_rknn_libs
         ;;

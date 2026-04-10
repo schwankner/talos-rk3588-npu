@@ -63,6 +63,17 @@ jobs:
         with:
           driver: docker-container
 
+      - name: Build kernel
+        if: steps.cache.outputs.skip != 'true'
+        env:
+          REGISTRY: "ghcr.io/${{ github.repository_owner }}"
+          CACHE_REGISTRY: "ghcr.io/${{ github.repository_owner }}/build-cache"
+        run: |
+          source scripts/common.sh
+          REGISTRY="${REGISTRY}" \
+          CACHE_REGISTRY="${CACHE_REGISTRY}" \
+          bash scripts/build-extensions.sh kernel
+
       - name: Build installer
         if: steps.cache.outputs.skip != 'true'
         env:
