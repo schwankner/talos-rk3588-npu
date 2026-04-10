@@ -887,6 +887,28 @@ Applied in `rockchip-rknpu/pkg.yaml` as a Python source patch during extension b
 
 ---
 
+## Bug 31: node crashes at first ioctl despite Bug 30 — regulator SCMI at runtime
+
+**Symptom:** After Bug 30, node still crashes within ~5 seconds of the bench pod starting.
+The crash happens before any Python output, indicating it occurs at the first ioctl.
+
+**Root cause:** Probe calls `rknpu_power_on()` (enables clocks, regulators) then at
+line 1537 calls `rknpu_power_off()` directly.  Bug 30 left `clk_bulk_disable_unprepare()`
+and `regulator_disable()` in `rknpu_power_off()`.  Bug 27's extra probe
+`clk_bulk_prepare_enable()` keeps clock refcount at 2 after probe's power_on, so probe's
+power_off decrements from 2→1 (no SCMI clock-disable).  BUT: regulators go from 1→0 in
+probe's power_off.  The first ioctl calls `rknpu_power_on()` which calls
+`regulator_enable()` with regulators at refcount 0 → actual SCMI enable SMC → hard hang.
+
+**Solution:** Make `rknpu_power_off()` a complete no-op (return 0 immediately).  Probe
+leaves clocks at refcount 2 (Bug 27 anchor) and regulators at refcount 1.  Every
+subsequent runtime `rknpu_power_on()` call increments refcounts without hitting the
+0→1 boundary → no SCMI ever sent at runtime.
+
+Applied in `rockchip-rknpu/pkg.yaml` as a Python source patch (after Bug 30 patch).
+
+---
+
 ## Bug 30: node crashes at build_graph() despite Bugs 25–29 — pm_runtime SCMI at runtime
 
 **Symptom:** After applying all of Bugs 25–29, the node still crashes within ~5 seconds of
