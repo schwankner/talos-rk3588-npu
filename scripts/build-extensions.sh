@@ -119,6 +119,16 @@ build_kernel() {
 
     local image="${REGISTRY}/talos-rk3588-kernel:${KERNEL_VERSION}"
 
+    # KERNEL_LOCAL_LOAD=true: load into local daemon instead of pushing to GHCR.
+    # Used by build-installer.sh so it can docker-create the image locally without
+    # requiring write access to the (pre-existing, unlinked) talos-rk3588-kernel
+    # GHCR package.
+    local output_flag="--push"
+    if [[ "${KERNEL_LOCAL_LOAD:-false}" == "true" ]]; then
+        output_flag="--load"
+        log "  (KERNEL_LOCAL_LOAD=true: loading into local daemon, skipping registry push)"
+    fi
+
     docker buildx build \
         --builder "${BUILDER_NAME}" \
         --file "${PKGS_WORK_DIR}/pkgs/Pkgfile" \
@@ -129,10 +139,14 @@ build_kernel() {
         --cache-from "type=registry,ref=${CACHE_REGISTRY}/kernel" \
         --cache-to   "type=registry,ref=${CACHE_REGISTRY}/kernel,mode=max" \
         --tag "${image}" \
-        --push \
+        ${output_flag} \
         "${PKGS_WORK_DIR}/pkgs"
 
-    log "Pushed: ${image}"
+    if [[ "${KERNEL_LOCAL_LOAD:-false}" == "true" ]]; then
+        log "Loaded into local daemon: ${image}"
+    else
+        log "Pushed: ${image}"
+    fi
 }
 
 # ---------------------------------------------------------------------------

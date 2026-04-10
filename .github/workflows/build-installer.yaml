@@ -72,6 +72,7 @@ jobs:
           source scripts/common.sh
           REGISTRY="${REGISTRY}" \
           CACHE_REGISTRY="${CACHE_REGISTRY}" \
+          KERNEL_LOCAL_LOAD=true \
           bash scripts/build-extensions.sh kernel
 
       - name: Build installer
