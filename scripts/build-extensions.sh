@@ -218,11 +218,13 @@ case "${TARGET}" in
     rknpu)      build_rknpu ;;
     rknn-libs)  build_rknn_libs ;;
     all)
-        # build_kernel pushes a standalone talos-rk3588-kernel image that is
-        # required by build-installer.sh.  It reuses the kernel-build cache
-        # layer shared with build_rknpu, so no extra compile time is incurred
-        # when both are run in the same workflow.
-        build_kernel
+        # build_kernel is NOT called here: pushing ghcr.io/schwankner/talos-rk3588-kernel
+        # requires package-level write access not granted to the Actions GITHUB_TOKEN.
+        # The kernel is compiled as an implicit dependency of build_rknpu and cached
+        # in build-cache/rockchip-rknpu (mode=max).  The Build Installer workflow
+        # reads that cache via --cache-from build-cache/rockchip-rknpu in build_kernel
+        # with KERNEL_LOCAL_LOAD=true, which loads the kernel into the local daemon
+        # for build-installer.sh to use.
         build_rknpu
         build_rknn_libs
         ;;
