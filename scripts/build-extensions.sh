@@ -124,9 +124,11 @@ build_kernel() {
     # requiring write access to the (pre-existing, unlinked) talos-rk3588-kernel
     # GHCR package.
     local output_flag="--push"
+    local cache_to_args=("--cache-to" "type=registry,ref=${CACHE_REGISTRY}/kernel,mode=max")
     if [[ "${KERNEL_LOCAL_LOAD:-false}" == "true" ]]; then
         output_flag="--load"
-        log "  (KERNEL_LOCAL_LOAD=true: loading into local daemon, skipping registry push)"
+        cache_to_args=()
+        log "  (KERNEL_LOCAL_LOAD=true: loading into local daemon, skipping registry push and cache write)"
     fi
 
     docker buildx build \
@@ -137,9 +139,9 @@ build_kernel() {
         --build-arg TAG="${BUILD_ARG_TAG}" \
         --build-arg PKGS="${PKGS_COMMIT}" \
         --cache-from "type=registry,ref=${CACHE_REGISTRY}/kernel" \
-        --cache-to   "type=registry,ref=${CACHE_REGISTRY}/kernel,mode=max" \
+        "${cache_to_args[@]}" \
         --tag "${image}" \
-        ${output_flag} \
+        "${output_flag}" \
         "${PKGS_WORK_DIR}/pkgs"
 
     if [[ "${KERNEL_LOCAL_LOAD:-false}" == "true" ]]; then
