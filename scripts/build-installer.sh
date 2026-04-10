@@ -52,10 +52,10 @@ CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-podman}"
 # GHCR org-level restrictions on creating brand-new packages.
 INSTALLER_IMAGE="${REGISTRY}/talos-rk3588-npu-installer-base:installer-v${TALOS_VERSION#v}"
 
-# Use /private/tmp so docker volume mounts work with colima — colima only
-# mounts /private/tmp via virtiofs (rw), not the macOS /var/folders path
-# that mktemp -d uses by default.
-WORK_DIR="/private/tmp/talos-build-work-$$"
+# On macOS with colima, use /private/tmp so docker volume mounts work —
+# colima only mounts /private/tmp via virtiofs (rw), not the macOS
+# /var/folders path that mktemp -d uses by default.  On Linux, /tmp works.
+WORK_DIR="${TMPDIR:-/tmp}/talos-build-work-$$"
 mkdir -p "${WORK_DIR}"
 trap 'rm -rf "${WORK_DIR}"' EXIT
 
