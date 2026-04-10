@@ -887,6 +887,35 @@ Applied in `rockchip-rknpu/pkg.yaml` as a Python source patch during extension b
 
 ---
 
+## Bug 28: build_graph() still hangs after Bug 27 fix — SCMI clock rate-set via devfreq
+
+**Symptom:** After applying Bugs 25–27 (PM domains, NPU device PM, and clocks all pinned
+always-on), `build_graph()` still hangs.  Node upgraded with the Bug 27 build, bench pod
+deployed, node crashed again at the same STEP 5 point.
+
+**Root cause:** A fourth SCMI path exists independently of `rknpu_power_on/off`.
+The `rknpu_devfreq_init()` function registers a `rknpu_ondemand` devfreq governor which
+calls `npu_devfreq_target()` to adjust NPU frequency based on load.  `npu_devfreq_target()`
+calls `dev_pm_opp_set_rate(dev, *freq)` → `clk_set_rate(scmi_clk, freq)` → SCMI
+clock-rate-set SMC into ATF at EL3 → hard hang.
+
+This path fires from the devfreq framework's governor workqueue independently of any ioctl
+or power-on/off cycle.  The `rknpu_power_on/off` PM fixes only address the power domain
+and clock enable/disable paths; they do not affect `clk_set_rate` calls made by devfreq.
+
+Even though `rknpu_devfreq_runtime_resume/suspend` are no-ops, the devfreq governor timer
+fires immediately once the devfreq device is registered and can issue `clk_set_rate` at any
+time.
+
+**Fix:** Replace `npu_devfreq_target()` body with a no-op `return 0`.  The devfreq
+governor is registered and the OPP table is set up normally, but no clock rate changes are
+ever issued.  The NPU operates at its boot-time frequency permanently.  Dynamic DVFS via
+SCMI is not viable on mainline RK3588 ATF.
+
+Applied in `rockchip-rknpu/pkg.yaml` as a Python source patch to `src/rknpu_devfreq.c`.
+
+---
+
 ## Bug 27: build_graph() still hangs after Bug 26 fix — SCMI clock path at EL3
 
 **Symptom:** After applying both Bug 25 and Bug 26 fixes (all PM domains and the NPU device
@@ -919,6 +948,9 @@ Combined with Bugs 25 and 26, all SCMI-triggering paths in `rknpu_drv.c` are now
 - genpd virtual devices npu0/1/2: `pm_runtime_get_noresume(virt_dev)` after attach (Bug 25)
 - NPU device `fdab0000.rknpu` itself: `pm_runtime_get_noresume(dev)` after `pm_runtime_enable` (Bug 26)
 - NPU clocks including `scmi_clk`: extra `clk_bulk_prepare_enable` in probe (Bug 27)
+
+**Note:** Bug 27 alone was not sufficient — the devfreq governor SCMI clock-rate-set path
+remained (see Bug 28).  All four fixes together (Bugs 25–28) are required.
 
 Applied in `rockchip-rknpu/pkg.yaml` as a Python source patch during extension build.
 

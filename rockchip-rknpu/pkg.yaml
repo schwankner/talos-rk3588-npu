@@ -72,6 +72,15 @@ steps:
         # so pm_runtime_put_sync(dev) in rknpu_power_off() never suspends it.
         python3 -c "import base64,sys; exec(base64.b64decode(b'aW1wb3J0IHN5cwpkID0gb3Blbignc3JjL3JrbnB1X2Rydi5jJykucmVhZCgpCm9sZCA9ICdcdHBtX3J1bnRpbWVfZW5hYmxlKGRldik7XG4nCm5ldyA9ICdcdHBtX3J1bnRpbWVfZW5hYmxlKGRldik7XG5cdHBtX3J1bnRpbWVfZ2V0X25vcmVzdW1lKGRldik7XG4nCmFzc2VydCBvbGQgaW4gZCwgJ1BBVENIIEZBSUxFRDogcG1fcnVudGltZV9lbmFibGUgcGF0dGVybiBub3QgZm91bmQnCmQgPSBkLnJlcGxhY2Uob2xkLCBuZXcsIDEpCm9wZW4oJ3NyYy9ya25wdV9kcnYuYycsICd3Jykud3JpdGUoZCkKc3lzLmV4aXQoMCBpZiAnXHRwbV9ydW50aW1lX2dldF9ub3Jlc3VtZShkZXYpO1xuJyBpbiBkIGVsc2UgMSkK').decode())"
 
+        # Disable SCMI clock rate changes via devfreq governor (Bug 28).
+        # npu_devfreq_target() calls dev_pm_opp_set_rate() → clk_set_rate(scmi_clk) →
+        # SCMI clock-rate-set SMC into ATF at EL3 → hard hang.  This fires from the
+        # rknpu_ondemand devfreq governor independently of rknpu_power_on/off whenever
+        # the governor decides to change frequency based on NPU load.  Fix: replace the
+        # devfreq target callback body with a no-op return 0, keeping the NPU at its
+        # boot-time frequency.  Dynamic DVFS is not viable on this ATF.
+        python3 -c "import base64,sys; exec(base64.b64decode(b'aW1wb3J0IHN5cwpkID0gb3Blbignc3JjL3JrbnB1X2RldmZyZXEuYycpLnJlYWQoKQpzaWcgPSAnc3RhdGljIGludCBucHVfZGV2ZnJlcV90YXJnZXQoc3RydWN0IGRldmljZSAqZGV2LCB1bnNpZ25lZCBsb25nICpmcmVxLFxuXHRcdFx0ICAgICAgdTMyIGZsYWdzKVxueycKYXNzZXJ0IHNpZyBpbiBkLCAnUEFUQ0ggRkFJTEVEOiBucHVfZGV2ZnJlcV90YXJnZXQgc2lnbmF0dXJlIG5vdCBmb3VuZCcKc3RhcnQgPSBkLmZpbmQoc2lnKQplbmQgPSBkLmZpbmQoJ1xufScsIHN0YXJ0KSArIDIKbmV3ID0gKHNpZyArICdcbicKICAgICAgICdcdC8qIFNDTUkgY2xrX3NldF9yYXRlIFNNQyBjcmFzaGVzIEFURiBhdCBFTDMgb24gbWFpbmxpbmUgUkszNTg4LlxuJwogICAgICAgJ1x0ICogS2VlcCBOUFUgYXQgYm9vdCBmcmVxdWVuY3k7IHNraXAgZGV2X3BtX29wcF9zZXRfcmF0ZSBlbnRpcmVseS4gKi9cbicKICAgICAgICdcdHJldHVybiAwO1xuJwogICAgICAgJ30nKQpkID0gZFs6c3RhcnRdICsgbmV3ICsgZFtlbmQ6XQpvcGVuKCdzcmMvcmtucHVfZGV2ZnJlcS5jJywgJ3cnKS53cml0ZShkKQpzeXMuZXhpdCgwIGlmICdLZWVwIE5QVSBhdCBib290IGZyZXF1ZW5jeScgaW4gZCBlbHNlIDEpCg==').decode())"
+
         # Keep NPU clocks always-on after probe to prevent SCMI crash at EL3 (Bug 27).
         # rknpu_power_off() calls clk_bulk_disable_unprepare() which issues a SCMI
         # clock-disable SMC into ATF, and the subsequent clk_bulk_prepare_enable() in
