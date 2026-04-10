@@ -880,9 +880,45 @@ the NPU's `runtime_resume` callback, which issues a SCMI power-domain-on SMC →
 in the probe function.  This keeps the NPU device's own usage count ≥1 permanently,
 so `pm_runtime_put_sync(dev)` in `rknpu_power_off()` never actually suspends the device.
 
-Combined with Bug 25, all three SCMI-triggering PM paths are now pinned always-on:
-- `genpd_dev_npu0`, `genpd_dev_npu1`, `genpd_dev_npu2` (Bug 25)
-- `dev` = `fdab0000.rknpu` itself (Bug 26)
+**Note:** Bug 26 alone was not sufficient — a third SCMI path via `clk_bulk_disable_unprepare`
+remained (see Bug 27).  All three fixes together are required to prevent EL3 crashes.
+
+Applied in `rockchip-rknpu/pkg.yaml` as a Python source patch during extension build.
+
+---
+
+## Bug 27: build_graph() still hangs after Bug 26 fix — SCMI clock path at EL3
+
+**Symptom:** After applying both Bug 25 and Bug 26 fixes (all PM domains and the NPU device
+itself pinned always-on), `build_graph()` still hangs the node.  Confirmed by deploying the
+Bug 26 build and seeing the crash persist at the same STEP 5 point in bench output.
+
+**Root cause:** A third SCMI path exists in `rknpu_power_on()` / `rknpu_power_off()`.
+Bug 25 pinned the genpd virtual devices; Bug 26 pinned the NPU device's own runtime PM.
+However `rknpu_power_off()` also calls `clk_bulk_disable_unprepare()` (line 1091 of
+`rknpu_drv.c`), which disables all NPU clocks including `scmi_clk` — an SCMI-managed
+clock.  The SCMI clock-disable issues an SMC into ATF at EL3.  On the next `build_graph()`
+call, `rknpu_power_on()` calls `clk_bulk_prepare_enable()` to re-enable the SCMI clock —
+another SMC into ATF → hard hang requiring BMC reset.
+
+The `scmi_clk` clock is the first entry in the NPU's device-tree `clocks` list and is
+managed via `devm_pm_opp_set_clkname(dev, "scmi_clk")` in `rknpu_devfreq.c`.  Every
+enable/disable of this clock goes through the SCMI firmware interface and triggers a
+synchronous SMC call into TF-A (Trusted Firmware-A) at EL3.  The ATF on mainline RK3588
+boards (confirmed on Turing RK1) crashes at EL3 when these SCMI clock SMCs arrive at
+runtime — same root cause as Bugs 25 and 26.
+
+**Fix:** Call `clk_bulk_prepare_enable(rknpu_dev->num_clks, rknpu_dev->clks)` once extra
+in probe, immediately after `rknpu_power_on()` returns.  This bumps the clock reference
+count to 2.  The `clk_bulk_disable_unprepare()` in `rknpu_power_off()` then decrements
+from 2 to 1 (clocks remain enabled — no SCMI SMC fired).  The next `rknpu_power_on()`
+increments from 1 to 2 again.  Steady state: clock ref count oscillates between 1 and 2,
+always ≥1, no SCMI clock-enable or clock-disable SMC is ever issued at runtime.
+
+Combined with Bugs 25 and 26, all SCMI-triggering paths in `rknpu_drv.c` are now pinned:
+- genpd virtual devices npu0/1/2: `pm_runtime_get_noresume(virt_dev)` after attach (Bug 25)
+- NPU device `fdab0000.rknpu` itself: `pm_runtime_get_noresume(dev)` after `pm_runtime_enable` (Bug 26)
+- NPU clocks including `scmi_clk`: extra `clk_bulk_prepare_enable` in probe (Bug 27)
 
 Applied in `rockchip-rknpu/pkg.yaml` as a Python source patch during extension build.
 

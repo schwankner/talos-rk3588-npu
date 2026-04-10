@@ -71,6 +71,17 @@ steps:
         # pm_runtime_enable(dev) in probe keeps usage count >=1 forever,
         # so pm_runtime_put_sync(dev) in rknpu_power_off() never suspends it.
         python3 -c "import base64,sys; exec(base64.b64decode(b'aW1wb3J0IHN5cwpkID0gb3Blbignc3JjL3JrbnB1X2Rydi5jJykucmVhZCgpCm9sZCA9ICdcdHBtX3J1bnRpbWVfZW5hYmxlKGRldik7XG4nCm5ldyA9ICdcdHBtX3J1bnRpbWVfZW5hYmxlKGRldik7XG5cdHBtX3J1bnRpbWVfZ2V0X25vcmVzdW1lKGRldik7XG4nCmFzc2VydCBvbGQgaW4gZCwgJ1BBVENIIEZBSUxFRDogcG1fcnVudGltZV9lbmFibGUgcGF0dGVybiBub3QgZm91bmQnCmQgPSBkLnJlcGxhY2Uob2xkLCBuZXcsIDEpCm9wZW4oJ3NyYy9ya25wdV9kcnYuYycsICd3Jykud3JpdGUoZCkKc3lzLmV4aXQoMCBpZiAnXHRwbV9ydW50aW1lX2dldF9ub3Jlc3VtZShkZXYpO1xuJyBpbiBkIGVsc2UgMSkK').decode())"
+
+        # Keep NPU clocks always-on after probe to prevent SCMI crash at EL3 (Bug 27).
+        # rknpu_power_off() calls clk_bulk_disable_unprepare() which issues a SCMI
+        # clock-disable SMC into ATF, and the subsequent clk_bulk_prepare_enable() in
+        # rknpu_power_on() (triggered by the next build_graph()/ioctl) issues a SCMI
+        # clock-enable SMC — both paths crash ATF at EL3 on mainline RK3588.
+        # Fix: call clk_bulk_prepare_enable() once extra in probe (after rknpu_power_on)
+        # to keep the clock reference count >=1 permanently.  The disable in power_off
+        # then decrements from 2 to 1 (clocks stay on), and the enable in power_on
+        # increments from 1 to 2 again — steady state, no SCMI SMC ever fires.
+        python3 -c "import base64,sys; exec(base64.b64decode(b'aW1wb3J0IHN5cwpkID0gb3Blbignc3JjL3JrbnB1X2Rydi5jJykucmVhZCgpCm9sZCA9ICdcdHJldCA9IHJrbnB1X3Bvd2VyX29uKHJrbnB1X2Rldik7XG5cdGlmIChyZXQpXG5cdFx0Z290byBlcnJfcmVtb3ZlX2RydjtcbicKbmV3ID0gJ1x0cmV0ID0gcmtucHVfcG93ZXJfb24ocmtucHVfZGV2KTtcblx0aWYgKHJldClcblx0XHRnb3RvIGVycl9yZW1vdmVfZHJ2O1xuXHRjbGtfYnVsa19wcmVwYXJlX2VuYWJsZShya25wdV9kZXYtPm51bV9jbGtzLCBya25wdV9kZXYtPmNsa3MpO1xuJwphc3NlcnQgb2xkIGluIGQsICdQQVRDSCBGQUlMRUQ6IHJrbnB1X3Bvd2VyX29uIHByb2JlIHBhdHRlcm4gbm90IGZvdW5kJwpkID0gZC5yZXBsYWNlKG9sZCwgbmV3LCAxKQpvcGVuKCdzcmMvcmtucHVfZHJ2LmMnLCAndycpLndyaXRlKGQpCnN5cy5leGl0KDAgaWYgJ1x0Y2xrX2J1bGtfcHJlcGFyZV9lbmFibGUocmtucHVfZGV2LT5udW1fY2xrcywgcmtucHVfZGV2LT5jbGtzKTtcbicgaW4gZCBlbHNlIDEpCg==').decode())"
     build:
       - |
         # Build rknpu.ko against the Talos kernel source.
