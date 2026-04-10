@@ -138,6 +138,7 @@ build_kernel() {
         --platform linux/arm64 \
         --build-arg TAG="${BUILD_ARG_TAG}" \
         --build-arg PKGS="${PKGS_COMMIT}" \
+        --cache-from "type=registry,ref=${CACHE_REGISTRY}/rockchip-rknpu" \
         --cache-from "type=registry,ref=${CACHE_REGISTRY}/kernel" \
         "${cache_to_args[@]}" \
         --tag "${image}" \

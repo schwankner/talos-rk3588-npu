@@ -887,6 +887,33 @@ Applied in `rockchip-rknpu/pkg.yaml` as a Python source patch during extension b
 
 ---
 
+## Bug 34: rknpu.ko fails to load after installer rebuild — module signing key mismatch
+
+**Symptom:** `rknpu.ko` fails to load after a fresh Build Installer run: Talos logs show
+`load rknpu failed: key was rejected by service` continuously in `KernelModuleSpecController`.
+Node reports `rockchip.com/npu: 0` — device plugin never finds DRM nodes.
+
+**Root cause:** The kernel module signing key is ephemeral: generated fresh for each kernel
+build. `rknpu.ko` must be signed with the EXACT same key embedded in the running kernel.
+After commit `07c66fe`, `build-extensions.sh all` no longer calls `build_kernel` explicitly
+(the kernel is built implicitly as a dependency of `build_rknpu` and cached in
+`build-cache/rockchip-rknpu`). The Build Installer workflow runs `build_kernel` with
+`KERNEL_LOCAL_LOAD=true`, which only reads from `build-cache/kernel`. Since `07c66fe` stopped
+writing to `build-cache/kernel` in the `all` target, that cache is stale. The installer
+kernel build results in a cache miss → rebuilds with a fresh key K_new. The rknpu.ko in
+GHCR was signed with K_old (from the last actual Build Extensions run). K_new ≠ K_old.
+
+**Solution (Bug 34):** Add `build-cache/rockchip-rknpu` as a higher-priority cache source
+in `build_kernel` (KERNEL_LOCAL_LOAD path). Since `build_rknpu` writes all layers (mode=max)
+to `build-cache/rockchip-rknpu`, this cache contains the kernel stage with the same signing
+key used to build rknpu.ko. The installer's kernel build now hits this cache and uses the
+same key. Requires a force-rebuild of both Build Extensions and Build Installer to resync.
+
+**Applied in:** `scripts/build-extensions.sh` (`--cache-from build-cache/rockchip-rknpu`
+added before `build-cache/kernel` in the `build_kernel` function).
+
+---
+
 ## Bug 33: node crashes at first DRM ioctl — genpd_runtime_resume at runtime after autosuspend
 
 **Symptom:** Node hard-hangs within ~5 seconds of any NPU bench pod starting (with all
