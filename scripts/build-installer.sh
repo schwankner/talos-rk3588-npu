@@ -132,7 +132,6 @@ INITRAMFS_ORIG_CID=$("${CONTAINER_RUNTIME}" create "${IMAGER_REF}")
 # All patching work runs inside the container (not via volume mount) to avoid
 # macOS/colima filesystem permission errors with root-owned Talos rootfs files.
 PATCH_CID=$("${CONTAINER_RUNTIME}" run -d \
-    --platform linux/amd64 \
     alpine:3.21 \
     sleep 3600)
 "${CONTAINER_RUNTIME}" cp "${IMAGER_CTX}/initramfs-orig.xz" "${PATCH_CID}:/tmp/initramfs-orig.xz"
@@ -396,7 +395,6 @@ log "Patching rk3588-turing-rk1.dtb (renaming rknn-core compat, adding rknpu nod
 # dtc is architecture-independent: it produces the same binary DTB regardless
 # of the host CPU.  alpine:3.21 is used to avoid 'latest' tag drift.
 "${CONTAINER_RUNTIME}" run --rm \
-    --platform linux/amd64 \
     -v "${COMBINED_CTX}:/work" \
     alpine:3.21 \
     sh -c "apk add --quiet dtc python3 && \
