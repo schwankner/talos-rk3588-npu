@@ -887,6 +887,39 @@ Applied in `rockchip-rknpu/pkg.yaml` as a Python source patch during extension b
 
 ---
 
+## Bug 29: node crashes 30-45s after boot — devfreq initialization SCMI paths
+
+**Symptom:** After applying Bugs 25–28, the node crashes spontaneously 30–45 seconds after
+boot with NO bench activity running.  The step test pod was still in Pending/ContainerCreating
+state when the node went unreachable.  This is a regression from earlier sessions where the
+node only crashed when the NPU bench was actively running.
+
+**Root cause:** Even with `npu_devfreq_target()` as a no-op (Bug 28), the
+`rknpu_devfreq_init()` function performs OPP/devfreq framework setup that triggers SCMI
+SMC calls independently of the governor callback:
+- `devm_pm_opp_set_clkname(dev, "scmi_clk")` registers the SCMI clock with the OPP
+  framework, which may query the current clock rate via `SCMI_CLOCK_RATE_GET`
+- `devm_pm_opp_of_add_table(dev)` builds the OPP table and may call `clk_get_rate` on
+  the registered SCMI clock
+- `devm_devfreq_add_device(dev, ...)` starts the devfreq polling timer (50 ms interval)
+  and may call `dev_pm_opp_set_rate` during initialization to set the initial OPP
+- The devfreq framework's `resume_freq` path calls `dev_pm_opp_set_rate` independently
+  when the device's runtime PM status changes
+
+The NPU driver was crashing via one or more of these paths within a minute of boot,
+completely independently of any NPU ioctl activity.
+
+**Fix:** Replace `rknpu_devfreq_init()` body with `return 0`, skipping ALL devfreq/OPP
+initialization.  `rknpu_dev->devfreq` remains NULL, so `devfreq_lock/unlock` in
+`rknpu_power_on/off` become safe no-ops.  The NPU runs at its boot-time frequency
+permanently.  SCMI-based DVFS is not viable on mainline RK3588 ATF.
+
+Applied in `rockchip-rknpu/pkg.yaml` as a Python source patch to `src/rknpu_devfreq.c`
+(replaces the Bug 28 partial fix — Bug 28's `npu_devfreq_target` no-op patch is superseded
+by this more complete fix).
+
+---
+
 ## Bug 28: build_graph() still hangs after Bug 27 fix — SCMI clock rate-set via devfreq
 
 **Symptom:** After applying Bugs 25–27 (PM domains, NPU device PM, and clocks all pinned
@@ -907,10 +940,9 @@ Even though `rknpu_devfreq_runtime_resume/suspend` are no-ops, the devfreq gover
 fires immediately once the devfreq device is registered and can issue `clk_set_rate` at any
 time.
 
-**Fix:** Replace `npu_devfreq_target()` body with a no-op `return 0`.  The devfreq
-governor is registered and the OPP table is set up normally, but no clock rate changes are
-ever issued.  The NPU operates at its boot-time frequency permanently.  Dynamic DVFS via
-SCMI is not viable on mainline RK3588 ATF.
+**Fix (partial):** Replace `npu_devfreq_target()` body with a no-op `return 0` to prevent
+explicit `dev_pm_opp_set_rate` calls from the governor.  However this proved insufficient —
+see Bug 29 for the remaining crash paths within devfreq initialization.
 
 Applied in `rockchip-rknpu/pkg.yaml` as a Python source patch to `src/rknpu_devfreq.c`.
 
