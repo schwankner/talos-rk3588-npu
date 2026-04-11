@@ -887,6 +887,31 @@ Applied in `rockchip-rknpu/pkg.yaml` as a Python source patch during extension b
 
 ---
 
+## Bug 35: Kernel panic in rknpu_probe — NULL pointer dereference via IS_ERR() missing NULL
+
+**Symptom:** Node crashes at boot with `Unable to handle kernel NULL pointer dereference at
+virtual address 00000000000001b0`, `pc : rknpu_probe+0x6c0/0xb10 [rknpu]`, followed by
+`Kernel panic - not syncing`. The NPU module loads but crashes immediately during probe.
+Address 0x1b0 = `offsetof(struct device, power.usage_count)` in `struct device`.
+
+**Root cause:** The Bug 26 patch (pinning genpd virtual devices always-on) called
+`pm_runtime_get_noresume(virt_dev)` after checking `!IS_ERR(virt_dev)`. However,
+`dev_pm_domain_attach_by_name()` can return NULL — meaning the device has no genpd virtual
+device for that power domain (not an error, just absent). `IS_ERR(NULL)` returns false, so
+the code entered the if-block and called `pm_runtime_get_noresume(NULL)`. That function
+dereferences `&dev->power.usage_count` at offset 0x1b0 from NULL → kernel panic.
+
+`IS_ERR()` only checks for ERR_PTR-encoded negative errno values. The correct macro is
+`IS_ERR_OR_NULL()`, which returns true for both NULL and ERR_PTR values.
+
+**Fix:** Replace `IS_ERR(virt_dev)` with `IS_ERR_OR_NULL(virt_dev)` in the Bug 26 patch
+for all three genpd virtual device checks (npu0, npu1, npu2) in `src/rknpu_drv.c`.
+
+**Applied in:** `rockchip-rknpu/pkg.yaml` — updated the base64-encoded Python patch for
+Bug 26 to use `IS_ERR_OR_NULL` throughout.
+
+---
+
 ## Bug 34: rknpu.ko fails to load after installer rebuild — module signing key mismatch
 
 **Symptom:** `rknpu.ko` fails to load after a fresh Build Installer run: Talos logs show
