@@ -39,16 +39,15 @@ rknpu-y := src/rknpu_drv.o src/rknpu_gem.o src/rknpu_fence.o \
 
 ccflags-y += -I$(src)/src/include
 ccflags-y += -I$(src)/src/include/compat
-# Forcibly suppress DRM_GEM regardless of autoconf or inherited flags.
-# The kernel's include/generated/autoconf.h is injected into every OOT
-# module build via -include linux/kconfig.h.  If the running kernel (or a
-# siderolabs/pkgs build-time kernel) was configured with any stale
-# CONFIG_ROCKCHIP_RKNPU_DRM_GEM entry, it would silently override the
-# absence of that flag in ccflags-y and activate the DRM_GEM probe path
-# (drm_dev_register instead of misc_register), leaving /dev/rknpu absent.
-# -U explicitly undefines the macro at the preprocessor level, taking
-# precedence over any -D from autoconf.h.
-ccflags-y += -UCONFIG_ROCKCHIP_RKNPU_DRM_GEM
+# Force DMA_HEAP / suppress DRM_GEM via a source-level force-include.
+#
+# GCC processes all -D/-U command-line flags BEFORE any -include files,
+# so a bare -UCONFIG_ROCKCHIP_RKNPU_DRM_GEM in ccflags-y is overridden
+# by autoconf.h's #define (loaded via KBUILD_CFLAGS' -include linux/kconfig.h).
+# rknpu_build_config.h is a second -include that comes AFTER linux/kconfig.h
+# in the compiler invocation (ccflags-y appends after KBUILD_CFLAGS), so its
+# #undef CONFIG_ROCKCHIP_RKNPU_DRM_GEM executes after autoconf.h and wins.
+ccflags-y += -include $(src)/src/include/compat/rknpu_build_config.h
 ccflags-y += -DCONFIG_ROCKCHIP_RKNPU_DMA_HEAP
 ccflags-y += -DCONFIG_ROCKCHIP_RKNPU_DEBUG_FS
 ccflags-y += -DCONFIG_ROCKCHIP_RKNPU_FENCE

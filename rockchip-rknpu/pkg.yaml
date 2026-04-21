@@ -46,6 +46,19 @@ steps:
         mkdir -p src/include/compat/linux
         cp /pkg/files/rk-dma-heap.h src/include/compat/linux/rk-dma-heap.h
 
+        # Install the build-config force-include header.  This header is
+        # picked up via -include $(src)/src/include/compat/rknpu_build_config.h
+        # in Kbuild.  It #undefs CONFIG_ROCKCHIP_RKNPU_DRM_GEM at the source
+        # level (after autoconf.h runs), ensuring misc_register() path is taken.
+        cp /pkg/files/rknpu_build_config.h src/include/compat/rknpu_build_config.h
+
+        # Diagnostic: report any RKNPU entries in the kernel's autoconf.h so
+        # we know whether CONFIG_ROCKCHIP_RKNPU_DRM_GEM is being injected.
+        echo "=== autoconf.h RKNPU entries ===" && \
+          grep -i "RKNPU" /src/include/generated/autoconf.h || \
+          echo "(no RKNPU entries in autoconf.h)" && \
+          echo "=== end autoconf.h ==="
+
         # Install rknpu_mem.c stub — the w568w driver declares
         # rknpu_mem_{create,destroy,sync}_ioctl in rknpu_mem.h and calls them
         # from rknpu_misc_ioctl, but provides no definitions.  The stubs return
