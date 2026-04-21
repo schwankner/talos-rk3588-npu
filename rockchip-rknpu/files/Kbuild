@@ -13,6 +13,13 @@
 #    "undefined symbol" when the .o is absent.  The author provided
 #    RKNPU_NO_DEVFREQ as an explicit escape hatch: when defined, the header
 #    always emits the inline no-op stubs regardless of CONFIG_PM_DEVFREQ.
+#
+# 3. -DCONFIG_ROCKCHIP_RKNPU_DMA_HEAP is added.
+#    The misc device /dev/rknpu is registered only when this flag is set
+#    (see rknpu_drv.c: #ifdef CONFIG_ROCKCHIP_RKNPU_DMA_HEAP misc_register).
+#    librknnrt.so v2.3.x opens /dev/rknpu to submit inference jobs via the
+#    BSP ioctl interface (type='r').  The DRM GEM config alone produces only
+#    /dev/dri/renderD* and /dev/dri/card*, which librknnrt.so cannot use.
 
 obj-m := rknpu.o
 rknpu-y := src/rknpu_drv.o src/rknpu_gem.o src/rknpu_fence.o \
@@ -22,6 +29,7 @@ rknpu-y := src/rknpu_drv.o src/rknpu_gem.o src/rknpu_fence.o \
 ccflags-y += -I$(src)/src/include
 ccflags-y += -I$(src)/src/include/compat
 ccflags-y += -DCONFIG_ROCKCHIP_RKNPU_DRM_GEM
+ccflags-y += -DCONFIG_ROCKCHIP_RKNPU_DMA_HEAP
 ccflags-y += -DCONFIG_ROCKCHIP_RKNPU_DEBUG_FS
 ccflags-y += -DCONFIG_ROCKCHIP_RKNPU_FENCE
 ccflags-y += -DRKNPU_NO_DEVFREQ

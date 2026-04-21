@@ -80,10 +80,17 @@ type mount struct {
 // DRM node discovery
 // ---------------------------------------------------------------------------
 
-// npuNodes holds the discovered DRM device nodes for the NPU.
+// rknpuMiscDev is the misc device created by rknpu.ko when
+// CONFIG_ROCKCHIP_RKNPU_DMA_HEAP is set. librknnrt.so v2.3.x opens this
+// device and uses BSP ioctl numbers (type='r') to submit inference jobs.
+// The DRM render/card nodes alone are not sufficient for librknnrt.so.
+const rknpuMiscDev = "/dev/rknpu"
+
+// npuNodes holds the discovered device nodes for the NPU.
 type npuNodes struct {
-	renderNode string // e.g. /dev/dri/renderD129 — used by inference workloads
+	renderNode string // e.g. /dev/dri/renderD129 — DRM render node
 	cardNode   string // e.g. /dev/dri/card1      — DRM master node
+	miscDev    string // /dev/rknpu — BSP ioctl interface for librknnrt.so
 }
 
 // healthy reports whether the primary render node exists and is accessible.
@@ -118,6 +125,11 @@ func discoverNPUNodes() (npuNodes, error) {
 	if nodes.renderNode == "" {
 		return npuNodes{}, fmt.Errorf("no renderD* node found under %s", npuSysFSBase)
 	}
+	// Check for the BSP misc device created when CONFIG_ROCKCHIP_RKNPU_DMA_HEAP
+	// is set. Not required for health reporting, but injected if present.
+	if _, err := os.Stat(rknpuMiscDev); err == nil {
+		nodes.miscDev = rknpuMiscDev
+	}
 	return nodes, nil
 }
 
@@ -141,6 +153,15 @@ func writeCDISpec(nodes npuNodes) error {
 	if nodes.cardNode != "" {
 		edits.DeviceNodes = append(edits.DeviceNodes,
 			deviceNode{Path: nodes.cardNode, Permissions: "rw"},
+		)
+	}
+
+	// BSP misc device — librknnrt.so v2.3.x opens /dev/rknpu and uses the
+	// BSP ioctl interface (type='r') to submit inference jobs. This device is
+	// created by rknpu.ko only when CONFIG_ROCKCHIP_RKNPU_DMA_HEAP is set.
+	if nodes.miscDev != "" {
+		edits.DeviceNodes = append(edits.DeviceNodes,
+			deviceNode{Path: nodes.miscDev, Permissions: "rw"},
 		)
 	}
 
@@ -174,7 +195,7 @@ func writeCDISpec(nodes npuNodes) error {
 		return fmt.Errorf("write cdi spec: %w", err)
 	}
 
-	log.Printf("CDI spec written to %s (render=%s card=%s)", cdiSpecFile, nodes.renderNode, nodes.cardNode)
+	log.Printf("CDI spec written to %s (render=%s card=%s misc=%s)", cdiSpecFile, nodes.renderNode, nodes.cardNode, nodes.miscDev)
 	return nil
 }
 
@@ -226,8 +247,10 @@ func (p *npuPlugin) ListAndWatch(_ *v1beta1.Empty, stream v1beta1.DevicePlugin_L
 			health = v1beta1.Unhealthy
 		}
 
-		// Rewrite CDI spec if the node assignment changed (e.g. after module reload).
-		if nodes.renderNode != lastNodes.renderNode && nodes.renderNode != "" {
+		// Rewrite CDI spec if the node assignment changed (e.g. after module reload)
+		// or if /dev/rknpu appeared after a udev delay at boot.
+		if (nodes.renderNode != lastNodes.renderNode || nodes.miscDev != lastNodes.miscDev) &&
+			nodes.renderNode != "" {
 			if err := writeCDISpec(nodes); err != nil {
 				log.Printf("ListAndWatch: CDI spec update failed: %v", err)
 			}
@@ -268,6 +291,17 @@ func (p *npuPlugin) Allocate(_ context.Context, req *v1beta1.AllocateRequest) (*
 		if nodes.cardNode != "" {
 			cr.Devices = append(cr.Devices, &v1beta1.DeviceSpec{
 				HostPath: nodes.cardNode, ContainerPath: nodes.cardNode, Permissions: "rw",
+			})
+		}
+		// BSP misc device: librknnrt.so opens /dev/rknpu and uses the BSP ioctl
+		// interface for job submission. Include in DeviceSpec so kubelet adds it
+		// to the cgroupv2 device allowlist (CDI mknod alone loses the 0666 mode
+		// in user-namespace pods).
+		if nodes.miscDev != "" {
+			cr.Devices = append(cr.Devices, &v1beta1.DeviceSpec{
+				HostPath:      nodes.miscDev,
+				ContainerPath: nodes.miscDev,
+				Permissions:   "rw",
 			})
 		}
 		// dma_heap: librknnrt.so uses dma_buf for zero-copy CPU↔NPU transfers.
@@ -374,7 +408,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("rknpu device not found after 60 s: %v", err)
 	}
-	log.Printf("Discovered NPU: render=%s card=%s", nodes.renderNode, nodes.cardNode)
+	log.Printf("Discovered NPU: render=%s card=%s misc=%s", nodes.renderNode, nodes.cardNode, nodes.miscDev)
 
 	// The kernel creates /dev/dma_heap/system with mode 0600. The udev rule in
 	// the rockchip-rknpu extension overrides this to 0666, but until the extension
