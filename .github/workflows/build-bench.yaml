@@ -39,4 +39,4 @@ jobs:
           context: test/rknn-bench
           platforms: linux/arm64
           push: true
-          tags: ghcr.io/schwankner/rknn-bench:${{ inputs.tag }}
+          tags: ghcr.io/schwankner/rk3588-rknn-bench:${{ inputs.tag }}

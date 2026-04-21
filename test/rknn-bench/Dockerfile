@@ -7,7 +7,7 @@
 #
 # Build (ARM64 native or via buildx):
 #   docker buildx build --platform linux/arm64 \
-#     -t ghcr.io/schwankner/rknn-bench:v9 --push .
+#     -t ghcr.io/schwankner/rk3588-rknn-bench:v10 --push .
 
 # Use debian:12-slim (Bookworm, glibc 2.36) + system Python 3.11 from apt.
 # python:3.11-slim switched to Debian Trixie (glibc 2.40+) which uses CPU
