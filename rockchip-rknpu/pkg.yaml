@@ -46,6 +46,26 @@ steps:
         mkdir -p src/include/compat/linux
         cp /pkg/files/rk-dma-heap.h src/include/compat/linux/rk-dma-heap.h
 
+        # Bug 35: rknpu_gem_sync_ioctl references rknpu_dev->fake_dev in the
+        # non-contiguous scatter-gather sync path.  fake_dev is a field that
+        # only exists in struct rknpu_device under CONFIG_ROCKCHIP_RKNPU_DRM_GEM
+        # (it is a synthetic platform device with the NPU DMA mask, created by
+        # drm_fake_dev_register).  With DMA_HEAP-only build the field is absent
+        # and compilation fails with "has no member named 'fake_dev'".
+        # Fix: replace the three fake_dev references with rknpu_dev->dev.
+        # The real NPU platform device has an identical DMA configuration
+        # (of_dma_configure is called during probe), so dma_sync_single_range_*
+        # behaves identically.
+        python3 -c "
+import sys
+d = open('src/rknpu_gem.c').read()
+assert 'rknpu_dev->fake_dev' in d, 'PATCH FAILED: fake_dev not found in rknpu_gem.c'
+d = d.replace('rknpu_dev->fake_dev', 'rknpu_dev->dev')
+assert 'rknpu_dev->fake_dev' not in d, 'PATCH FAILED: fake_dev still present'
+open('src/rknpu_gem.c', 'w').write(d)
+sys.exit(0)
+"
+
         # Add MODULE_DEVICE_TABLE so udev autoloads rknpu.ko when the kernel
         # reports a DT device with compatible = "rockchip,rk3588-rknpu".
         # Without this, modules.alias has no "of:" entry and udevd never
