@@ -184,28 +184,46 @@ func writeCDISpec(nodes npuNodes) error {
 
 type npuPlugin struct {
 	v1beta1.UnimplementedDevicePluginServer
-	grpcServer *grpc.Server
+	grpcServer  *grpc.Server
+	serverError chan error // receives fatal gRPC server errors
 }
 
 func (p *npuPlugin) GetDevicePluginOptions(_ context.Context, _ *v1beta1.Empty) (*v1beta1.DevicePluginOptions, error) {
 	return &v1beta1.DevicePluginOptions{}, nil
 }
 
+// unhealthyThreshold is the number of consecutive poll failures required
+// before ListAndWatch reports the device as Unhealthy. A single transient
+// sysfs glitch (e.g. DRM power-management during active NPU inference) must
+// not cause kubelet to kill running pods. At pollInterval=10s this gives a
+// 30-second grace window before health transitions to Unhealthy.
+const unhealthyThreshold = 3
+
 // ListAndWatch rediscovers the DRM nodes on every poll so the health status
 // reflects module load/unload without requiring a pod restart.
+// Health transitions use hysteresis: the device is only reported Unhealthy
+// after unhealthyThreshold consecutive failures, and recovers immediately on
+// a single successful poll.
 func (p *npuPlugin) ListAndWatch(_ *v1beta1.Empty, stream v1beta1.DevicePlugin_ListAndWatchServer) error {
 	log.Println("ListAndWatch: starting")
 	var lastNodes npuNodes
+	var failCount int
 
 	for {
 		nodes, err := discoverNPUNodes()
-		health := v1beta1.Healthy
 		if err != nil {
-			health = v1beta1.Unhealthy
-			log.Printf("ListAndWatch: device unavailable: %v", err)
+			failCount++
+			log.Printf("ListAndWatch: device unavailable (%d/%d): %v", failCount, unhealthyThreshold, err)
 		} else if !nodes.healthy() {
+			failCount++
+			log.Printf("ListAndWatch: render node %s not accessible (%d/%d)", nodes.renderNode, failCount, unhealthyThreshold)
+		} else {
+			failCount = 0
+		}
+
+		health := v1beta1.Healthy
+		if failCount >= unhealthyThreshold {
 			health = v1beta1.Unhealthy
-			log.Printf("ListAndWatch: render node %s not accessible", nodes.renderNode)
 		}
 
 		// Rewrite CDI spec if the node assignment changed (e.g. after module reload).
@@ -286,11 +304,13 @@ func (p *npuPlugin) start() error {
 	}
 
 	p.grpcServer = grpc.NewServer()
+	p.serverError = make(chan error, 1)
 	v1beta1.RegisterDevicePluginServer(p.grpcServer, p)
 
 	go func() {
 		if err := p.grpcServer.Serve(lis); err != nil {
-			log.Fatalf("gRPC server error: %v", err)
+			log.Printf("gRPC server error: %v", err)
+			p.serverError <- err
 		}
 	}()
 
@@ -381,8 +401,11 @@ func main() {
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	<-sig
-
-	log.Println("Shutting down")
+	select {
+	case <-sig:
+		log.Println("Shutting down")
+	case err := <-plugin.serverError:
+		log.Fatalf("gRPC server terminated unexpectedly: %v", err)
+	}
 	plugin.stop()
 }
