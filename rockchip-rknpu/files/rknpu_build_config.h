@@ -13,8 +13,8 @@
  * follow KBUILD_CFLAGS in the GCC invocation), so its #undef executes
  * after autoconf.h and wins unconditionally.
  *
- * DMA_HEAP mode: misc_register() → /dev/rknpu (required by librknnrt.so).
- * DRM_GEM mode:  drm_dev_register() → /dev/dri/* (unusable by librknnrt).
+ * DMA_HEAP mode: misc_register() -> /dev/rknpu (required by librknnrt.so).
+ * DRM_GEM mode:  drm_dev_register() -> /dev/dri/renderD* (unusable by librknnrt).
  */
 #ifdef CONFIG_ROCKCHIP_RKNPU_DRM_GEM
 #undef CONFIG_ROCKCHIP_RKNPU_DRM_GEM
