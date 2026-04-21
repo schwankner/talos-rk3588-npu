@@ -65,6 +65,15 @@ steps:
         # behaves identically.
         python3 -c "import base64,sys; exec(base64.b64decode(b'aW1wb3J0IHN5cwpkID0gb3Blbignc3JjL3JrbnB1X2dlbS5jJykucmVhZCgpCmFzc2VydCAncmtucHVfZGV2LT5mYWtlX2RldicgaW4gZCwgJ1BBVENIIEZBSUxFRDogZmFrZV9kZXYgbm90IGZvdW5kIGluIHJrbnB1X2dlbS5jJwpkID0gZC5yZXBsYWNlKCdya25wdV9kZXYtPmZha2VfZGV2JywgJ3JrbnB1X2Rldi0+ZGV2JykKYXNzZXJ0ICdya25wdV9kZXYtPmZha2VfZGV2JyBub3QgaW4gZCwgJ1BBVENIIEZBSUxFRDogZmFrZV9kZXYgc3RpbGwgcHJlc2VudCcKb3Blbignc3JjL3JrbnB1X2dlbS5jJywgJ3cnKS53cml0ZShkKQpzeXMuZXhpdCgwKQo=').decode())"
 
+        # Bug 36: rk_dma_heap_find("rk-dma-heap-cma") returns NULL on mainline
+        # kernels — the Rockchip BSP CMA heap is not exported.  The probe then
+        # goto err_remove_drv → misc_deregister(), leaving /dev/rknpu absent.
+        # librknnrt.so v2.3.x uses /dev/dma_heap/system for memory allocation
+        # and /dev/rknpu only for RKNPU_SUBMIT; the rknpu CMA heap is never
+        # needed.  Fix: make the heap-not-found check a warning-only so
+        # /dev/rknpu stays registered and rknpu_dev->heap is left NULL.
+        python3 -c "import base64,sys; exec(base64.b64decode(b'aW1wb3J0IHN5cwpkID0gb3Blbignc3JjL3JrbnB1X2Rydi5jJykucmVhZCgpCm9sZCA9ICgKICAgICdcdHJrbnB1X2Rldi0+aGVhcCA9IHJrX2RtYV9oZWFwX2ZpbmQoInJrLWRtYS1oZWFwLWNtYSIpO1xuJwogICAgJ1x0aWYgKCFya25wdV9kZXYtPmhlYXApIHtcbicKICAgICdcdFx0TE9HX0RFVl9FUlJPUihkZXYsICJmYWlsZWQgdG8gZmluZCBjbWEgaGVhcFxcbiIpO1xuJwogICAgJ1x0XHRyZXQgPSAtRU5PTUVNO1xuJwogICAgJ1x0XHRnb3RvIGVycl9yZW1vdmVfZHJ2O1xuJwogICAgJ1x0fVxuJwogICAgJ1x0cmtfZG1hX2hlYXBfc2V0X2RldihkZXYpO1xuJwopCm5ldyA9ICgKICAgICdcdHJrbnB1X2Rldi0+aGVhcCA9IHJrX2RtYV9oZWFwX2ZpbmQoInJrLWRtYS1oZWFwLWNtYSIpO1xuJwogICAgJ1x0aWYgKHJrbnB1X2Rldi0+aGVhcClcbicKICAgICdcdFx0cmtfZG1hX2hlYXBfc2V0X2RldihkZXYpO1xuJwogICAgJ1x0ZWxzZVxuJwogICAgJ1x0XHRMT0dfREVWX1dBUk4oZGV2LCAicmstZG1hLWhlYXAtY21hIG5vdCBmb3VuZDsgaGVhcCBhbGxvYyBkaXNhYmxlZFxcbiIpO1xuJwopCmFzc2VydCBvbGQgaW4gZCwgIlBBVENIIEZBSUxFRDogaGVhcCBjaGVjayBwYXR0ZXJuIG5vdCBmb3VuZCIKZCA9IGQucmVwbGFjZShvbGQsIG5ldywgMSkKb3Blbigic3JjL3JrbnB1X2Rydi5jIiwgInciKS53cml0ZShkKQpzeXMuZXhpdCgwIGlmICJyay1kbWEtaGVhcC1jbWEgbm90IGZvdW5kIiBpbiBkIGVsc2UgMSkK').decode())"
+
         # Add MODULE_DEVICE_TABLE so udev autoloads rknpu.ko when the kernel
         # reports a DT device with compatible = "rockchip,rk3588-rknpu".
         # Without this, modules.alias has no "of:" entry and udevd never
