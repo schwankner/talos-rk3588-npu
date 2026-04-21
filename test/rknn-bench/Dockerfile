@@ -7,7 +7,7 @@
 #
 # Build (ARM64 native or via buildx):
 #   docker buildx build --platform linux/arm64 \
-#     -t ghcr.io/schwankner/rk3588-rknn-bench:v12 --push .
+#     -t ghcr.io/schwankner/rk3588-rknn-bench:v13 --push .
 
 # Use debian:12-slim (Bookworm, glibc 2.36) + system Python 3.11 from apt.
 # python:3.11-slim switched to Debian Trixie (glibc 2.40+) which uses CPU
@@ -16,7 +16,7 @@ FROM debian:12-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 python3-pip python3-dev \
-        libgomp1 strace ca-certificates \
+        libgomp1 strace ca-certificates file \
     && rm -rf /var/lib/apt/lists/*
 
 # rknn-toolkit-lite2 wheel (Python wrapper that dlopen()s librknnrt.so)
