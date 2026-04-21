@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
@@ -22,14 +21,11 @@ const (
 	resourceName = "rockchip.com/npu"
 	deviceID     = "rknpu0"
 
-	// The w568w/rknpu-module driver registers the NPU as a DRM device under this
-	// sysfs path. All RK3588 variants share the same base address (fdab0000).
-	// The DRM subsystem populates subdirectories named "renderD<N>" and "card<N>"
-	// here after the driver binds; we discover them at runtime so the plugin is
-	// not sensitive to minor-number assignment order.
-	// Note: the platform driver name is "RKNPU" (uppercase) as registered by
-	// w568w/rknpu-module.
-	npuSysFSBase = "/sys/bus/platform/drivers/RKNPU/fdab0000.rknpu/drm"
+	// rknpu.ko registers a misc device at /dev/rknpu when
+	// CONFIG_ROCKCHIP_RKNPU_DMA_HEAP is set (our build config).
+	// librknnrt.so v2.3.x opens this device and submits inference jobs via
+	// BSP ioctl numbers (type='r'). There are no DRM render nodes in this mode.
+	rknpuMiscDev = "/dev/rknpu"
 
 	// librknnrt.so is installed by the rockchip-rknn-libs Talos extension.
 	librknnrt = "/usr/lib/librknnrt.so"
@@ -77,93 +73,35 @@ type mount struct {
 }
 
 // ---------------------------------------------------------------------------
-// DRM node discovery
+// NPU device discovery (DMA_HEAP mode)
 // ---------------------------------------------------------------------------
 
-// rknpuMiscDev is the misc device created by rknpu.ko when
-// CONFIG_ROCKCHIP_RKNPU_DMA_HEAP is set. librknnrt.so v2.3.x opens this
-// device and uses BSP ioctl numbers (type='r') to submit inference jobs.
-// The DRM render/card nodes alone are not sufficient for librknnrt.so.
-const rknpuMiscDev = "/dev/rknpu"
-
-// npuNodes holds the discovered device nodes for the NPU.
-type npuNodes struct {
-	renderNode string // e.g. /dev/dri/renderD129 — DRM render node
-	cardNode   string // e.g. /dev/dri/card1      — DRM master node
-	miscDev    string // /dev/rknpu — BSP ioctl interface for librknnrt.so
-}
-
-// healthy reports whether the primary render node exists and is accessible.
-func (n *npuNodes) healthy() bool {
-	if n.renderNode == "" {
-		return false
+// discoverNPU checks that the rknpu misc device exists. In DMA_HEAP build
+// mode rknpu.ko calls misc_register() and creates /dev/rknpu; there are no
+// DRM render or card nodes.
+func discoverNPU() error {
+	if _, err := os.Stat(rknpuMiscDev); err != nil {
+		return fmt.Errorf("%s not found: %w — is rknpu.ko loaded?", rknpuMiscDev, err)
 	}
-	_, err := os.Stat(n.renderNode)
-	return err == nil
-}
-
-// discoverNPUNodes reads the rknpu sysfs entry to find the DRM render and card
-// nodes created by the driver. Returns an error if the driver is not loaded or
-// has not yet bound to the device.
-func discoverNPUNodes() (npuNodes, error) {
-	entries, err := os.ReadDir(npuSysFSBase)
-	if err != nil {
-		return npuNodes{}, fmt.Errorf("rknpu sysfs not found (%s): %w — is rknpu.ko loaded?", npuSysFSBase, err)
-	}
-
-	var nodes npuNodes
-	for _, e := range entries {
-		name := e.Name()
-		switch {
-		case strings.HasPrefix(name, "renderD"):
-			nodes.renderNode = "/dev/dri/" + name
-		case strings.HasPrefix(name, "card"):
-			nodes.cardNode = "/dev/dri/" + name
-		}
-	}
-
-	if nodes.renderNode == "" {
-		return npuNodes{}, fmt.Errorf("no renderD* node found under %s", npuSysFSBase)
-	}
-	// Check for the BSP misc device created when CONFIG_ROCKCHIP_RKNPU_DMA_HEAP
-	// is set. Not required for health reporting, but injected if present.
-	if _, err := os.Stat(rknpuMiscDev); err == nil {
-		nodes.miscDev = rknpuMiscDev
-	}
-	return nodes, nil
+	return nil
 }
 
 // ---------------------------------------------------------------------------
 // CDI spec management
 // ---------------------------------------------------------------------------
 
-func writeCDISpec(nodes npuNodes) error {
+func writeCDISpec() error {
 	if err := os.MkdirAll(cdiSpecDir, 0755); err != nil {
 		return fmt.Errorf("create cdi dir: %w", err)
 	}
 
 	edits := containerEdit{}
 
-	// Primary: DRM render node (no DRM master required — safe for unprivileged use).
+	// BSP misc device — librknnrt.so v2.3.x opens /dev/rknpu and uses BSP
+	// ioctl numbers (type='r') to submit inference jobs.
 	edits.DeviceNodes = append(edits.DeviceNodes,
-		deviceNode{Path: nodes.renderNode, Permissions: "rw"},
+		deviceNode{Path: rknpuMiscDev, Permissions: "rw"},
 	)
-
-	// Card node — some RKNN operations (e.g. power-state query) use the master fd.
-	if nodes.cardNode != "" {
-		edits.DeviceNodes = append(edits.DeviceNodes,
-			deviceNode{Path: nodes.cardNode, Permissions: "rw"},
-		)
-	}
-
-	// BSP misc device — librknnrt.so v2.3.x opens /dev/rknpu and uses the
-	// BSP ioctl interface (type='r') to submit inference jobs. This device is
-	// created by rknpu.ko only when CONFIG_ROCKCHIP_RKNPU_DMA_HEAP is set.
-	if nodes.miscDev != "" {
-		edits.DeviceNodes = append(edits.DeviceNodes,
-			deviceNode{Path: nodes.miscDev, Permissions: "rw"},
-		)
-	}
 
 	// dma_heap is intentionally omitted from CDI deviceNodes.
 	// CDI creates device nodes via mknod (not bind-mount), which produces mode
@@ -195,7 +133,7 @@ func writeCDISpec(nodes npuNodes) error {
 		return fmt.Errorf("write cdi spec: %w", err)
 	}
 
-	log.Printf("CDI spec written to %s (render=%s card=%s misc=%s)", cdiSpecFile, nodes.renderNode, nodes.cardNode, nodes.miscDev)
+	log.Printf("CDI spec written to %s", cdiSpecFile)
 	return nil
 }
 
@@ -215,46 +153,34 @@ func (p *npuPlugin) GetDevicePluginOptions(_ context.Context, _ *v1beta1.Empty) 
 
 // unhealthyThreshold is the number of consecutive poll failures required
 // before ListAndWatch reports the device as Unhealthy. A single transient
-// sysfs glitch (e.g. DRM power-management during active NPU inference) must
-// not cause kubelet to kill running pods. At pollInterval=10s this gives a
-// 30-second grace window before health transitions to Unhealthy.
+// glitch must not cause kubelet to kill running pods. At pollInterval=10s
+// this gives a 30-second grace window before health transitions to Unhealthy.
 const unhealthyThreshold = 3
 
-// ListAndWatch rediscovers the DRM nodes on every poll so the health status
-// reflects module load/unload without requiring a pod restart.
-// Health transitions use hysteresis: the device is only reported Unhealthy
-// after unhealthyThreshold consecutive failures, and recovers immediately on
-// a single successful poll.
+// ListAndWatch polls for /dev/rknpu on every tick so health status reflects
+// module load/unload without requiring a pod restart.
 func (p *npuPlugin) ListAndWatch(_ *v1beta1.Empty, stream v1beta1.DevicePlugin_ListAndWatchServer) error {
 	log.Println("ListAndWatch: starting")
-	var lastNodes npuNodes
 	var failCount int
 
 	for {
-		nodes, err := discoverNPUNodes()
+		err := discoverNPU()
 		if err != nil {
 			failCount++
 			log.Printf("ListAndWatch: device unavailable (%d/%d): %v", failCount, unhealthyThreshold, err)
-		} else if !nodes.healthy() {
-			failCount++
-			log.Printf("ListAndWatch: render node %s not accessible (%d/%d)", nodes.renderNode, failCount, unhealthyThreshold)
 		} else {
+			if failCount > 0 {
+				log.Printf("ListAndWatch: device recovered, rewriting CDI spec")
+				if wErr := writeCDISpec(); wErr != nil {
+					log.Printf("ListAndWatch: CDI spec update failed: %v", wErr)
+				}
+			}
 			failCount = 0
 		}
 
 		health := v1beta1.Healthy
 		if failCount >= unhealthyThreshold {
 			health = v1beta1.Unhealthy
-		}
-
-		// Rewrite CDI spec if the node assignment changed (e.g. after module reload)
-		// or if /dev/rknpu appeared after a udev delay at boot.
-		if (nodes.renderNode != lastNodes.renderNode || nodes.miscDev != lastNodes.miscDev) &&
-			nodes.renderNode != "" {
-			if err := writeCDISpec(nodes); err != nil {
-				log.Printf("ListAndWatch: CDI spec update failed: %v", err)
-			}
-			lastNodes = nodes
 		}
 
 		if err := stream.Send(&v1beta1.ListAndWatchResponse{
@@ -269,42 +195,27 @@ func (p *npuPlugin) ListAndWatch(_ *v1beta1.Empty, stream v1beta1.DevicePlugin_L
 }
 
 func (p *npuPlugin) Allocate(_ context.Context, req *v1beta1.AllocateRequest) (*v1beta1.AllocateResponse, error) {
-	nodes, err := discoverNPUNodes()
-	if err != nil {
+	if err := discoverNPU(); err != nil {
 		return nil, fmt.Errorf("allocate: NPU not available: %w", err)
 	}
 
 	resp := &v1beta1.AllocateResponse{}
 	for range req.ContainerRequests {
 		cr := &v1beta1.ContainerAllocateResponse{
-			// CDI path: containerd reads /var/run/cdi/rockchip-npu.yaml and injects
-			// the full device list (render node, card node, dma_heap, librknnrt.so).
+			// CDI path: containerd reads /var/run/cdi/rockchip-npu.yaml and
+			// injects /dev/rknpu and the librknnrt.so bind-mount.
 			CDIDevices: []*v1beta1.CDIDevice{{Name: cdiDeviceRef}},
 			// DeviceSpec: kubelet uses this to bind-mount device nodes into the
 			// container and add them to the cgroupv2 device eBPF allowlist.
-			// We list all three device nodes here so kubelet handles cgroup access
-			// regardless of whether CDI is fully functional.
 			Devices: []*v1beta1.DeviceSpec{
-				{HostPath: nodes.renderNode, ContainerPath: nodes.renderNode, Permissions: "rw"},
+				{
+					HostPath:      rknpuMiscDev,
+					ContainerPath: rknpuMiscDev,
+					Permissions:   "rw",
+				},
 			},
 		}
-		if nodes.cardNode != "" {
-			cr.Devices = append(cr.Devices, &v1beta1.DeviceSpec{
-				HostPath: nodes.cardNode, ContainerPath: nodes.cardNode, Permissions: "rw",
-			})
-		}
-		// BSP misc device: librknnrt.so opens /dev/rknpu and uses the BSP ioctl
-		// interface for job submission. Include in DeviceSpec so kubelet adds it
-		// to the cgroupv2 device allowlist (CDI mknod alone loses the 0666 mode
-		// in user-namespace pods).
-		if nodes.miscDev != "" {
-			cr.Devices = append(cr.Devices, &v1beta1.DeviceSpec{
-				HostPath:      nodes.miscDev,
-				ContainerPath: nodes.miscDev,
-				Permissions:   "rw",
-			})
-		}
-		// dma_heap: librknnrt.so uses dma_buf for zero-copy CPU↔NPU transfers.
+		// dma_heap: librknnrt.so uses dma_buf for zero-copy CPU<->NPU transfers.
 		// Include it in DeviceSpec (not just CDI) so kubelet handles the cgroup
 		// device allowlist — CDI alone leaves the file mode wrong (mknod vs bind).
 		if _, err := os.Stat("/dev/dma_heap/system"); err == nil {
@@ -392,34 +303,33 @@ func main() {
 	log.SetPrefix("[rk3588-npu-device-plugin] ")
 	log.Println("Starting")
 
-	// Wait up to 60 s for the rknpu driver to bind and create DRM nodes.
+	// Wait up to 60 s for rknpu.ko to load and register /dev/rknpu.
 	// This handles the case where the DaemonSet pod starts before udevd
 	// has finished processing the module load event.
-	var nodes npuNodes
 	var err error
 	for i := 0; i < 12; i++ {
-		nodes, err = discoverNPUNodes()
+		err = discoverNPU()
 		if err == nil {
 			break
 		}
-		log.Printf("Waiting for rknpu DRM nodes (%d/12): %v", i+1, err)
+		log.Printf("Waiting for /dev/rknpu (%d/12): %v", i+1, err)
 		time.Sleep(5 * time.Second)
 	}
 	if err != nil {
-		log.Fatalf("rknpu device not found after 60 s: %v", err)
+		log.Fatalf("/dev/rknpu not found after 60 s: %v", err)
 	}
-	log.Printf("Discovered NPU: render=%s card=%s misc=%s", nodes.renderNode, nodes.cardNode, nodes.miscDev)
+	log.Printf("Discovered NPU: %s", rknpuMiscDev)
 
 	// The kernel creates /dev/dma_heap/system with mode 0600. The udev rule in
-	// the rockchip-rknpu extension overrides this to 0666, but until the extension
-	// is rebuilt we set it here. Running as uid 0 (file owner) so no CAP_FOWNER needed.
+	// the rockchip-rknpu extension overrides this to 0666, but until the rule
+	// fires we ensure it here. Running as uid 0 so no CAP_FOWNER needed.
 	if err := os.Chmod("/dev/dma_heap/system", 0o666); err != nil {
 		log.Printf("Warning: chmod /dev/dma_heap/system: %v (device may be inaccessible in user-namespace pods)", err)
 	} else {
 		log.Println("chmod 0666 /dev/dma_heap/system")
 	}
 
-	if err := writeCDISpec(nodes); err != nil {
+	if err := writeCDISpec(); err != nil {
 		log.Fatalf("Failed to write CDI spec: %v", err)
 	}
 

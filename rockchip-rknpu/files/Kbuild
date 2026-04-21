@@ -23,9 +23,10 @@
 #    inference jobs via the BSP ioctl interface (type='r').  With DRM_GEM only,
 #    the driver creates /dev/dri/renderD* and /dev/dri/card* which librknnrt
 #    cannot use.
-#    The DRM device is still registered (drm_dev_register is not conditional),
-#    so /sys/bus/platform/drivers/RKNPU/fdab0000.rknpu/drm/ still exists for
-#    device-plugin discovery.
+#    NOTE: drm_dev_register IS conditional on CONFIG_ROCKCHIP_RKNPU_DRM_GEM
+#    in rknpu_drv.c (line ~852).  With DMA_HEAP-only, no DRM device is created
+#    and /sys/bus/platform/drivers/RKNPU/fdab0000.rknpu/drm/ does NOT exist.
+#    The device plugin discovers the NPU via /dev/rknpu directly.
 #
 # 4. linux/rk-dma-heap.h stub is provided in src/include/compat/linux/.
 #    The rk-dma-heap API is Rockchip BSP-only and absent from mainline 6.x.
