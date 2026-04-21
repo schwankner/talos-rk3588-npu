@@ -4,24 +4,21 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Image tag (e.g. v10)'
+        description: 'Image tag (e.g. v11)'
         required: true
-        default: 'v10'
+        default: 'v11'
 
 jobs:
   build:
     name: Build rknn-bench ARM64
-    runs-on: ubuntu-latest
+    # Native ARM64 runner — avoids QEMU layer-diff bug that zero-truncates
+    # large binaries (python3.11) in pip-install layers built under emulation.
+    runs-on: ubuntu-24.04-arm
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3

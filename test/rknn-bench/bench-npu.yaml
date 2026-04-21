@@ -22,7 +22,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: bench
-          image: ghcr.io/schwankner/rk3588-rknn-bench:v10
+          image: ghcr.io/schwankner/rk3588-rknn-bench:v11
           imagePullPolicy: Always
           args: ["--mode", "npu", "--iterations", "200"]
           securityContext:
