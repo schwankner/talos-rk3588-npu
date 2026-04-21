@@ -55,7 +55,7 @@ spec:
 
       containers:
         - name: rk3588-npu-device-plugin
-          image: ghcr.io/schwankner/rk3588-npu-device-plugin:181698a
+          image: ghcr.io/schwankner/rk3588-npu-device-plugin:23c4078
           imagePullPolicy: Always
 
           securityContext:
