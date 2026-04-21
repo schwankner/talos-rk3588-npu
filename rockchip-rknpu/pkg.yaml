@@ -46,6 +46,13 @@ steps:
         mkdir -p src/include/compat/linux
         cp /pkg/files/rk-dma-heap.h src/include/compat/linux/rk-dma-heap.h
 
+        # Install rknpu_mem.c stub — the w568w driver declares
+        # rknpu_mem_{create,destroy,sync}_ioctl in rknpu_mem.h and calls them
+        # from rknpu_misc_ioctl, but provides no definitions.  The stubs return
+        # -ENOSYS; librknnrt.so uses /dev/dma_heap/system for memory and never
+        # calls these ioctls, so the module links and functions correctly.
+        cp /pkg/files/rknpu_mem.c src/rknpu_mem.c
+
         # Bug 35: rknpu_gem_sync_ioctl references rknpu_dev->fake_dev in the
         # non-contiguous scatter-gather sync path.  fake_dev is a field that
         # only exists in struct rknpu_device under CONFIG_ROCKCHIP_RKNPU_DRM_GEM
