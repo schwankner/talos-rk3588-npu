@@ -14,12 +14,23 @@
 #    RKNPU_NO_DEVFREQ as an explicit escape hatch: when defined, the header
 #    always emits the inline no-op stubs regardless of CONFIG_PM_DEVFREQ.
 #
-# 3. -DCONFIG_ROCKCHIP_RKNPU_DMA_HEAP is added.
-#    The misc device /dev/rknpu is registered only when this flag is set
-#    (see rknpu_drv.c: #ifdef CONFIG_ROCKCHIP_RKNPU_DMA_HEAP misc_register).
-#    librknnrt.so v2.3.x opens /dev/rknpu to submit inference jobs via the
-#    BSP ioctl interface (type='r').  The DRM GEM config alone produces only
-#    /dev/dri/renderD* and /dev/dri/card*, which librknnrt.so cannot use.
+# 3. -DCONFIG_ROCKCHIP_RKNPU_DMA_HEAP is added (DRM_GEM is NOT set).
+#    These two flags are mutually exclusive: rknpu_submit_ioctl is declared
+#    with incompatible signatures under each path, causing "conflicting types"
+#    compile errors when both are set.
+#    DMA_HEAP is required so that misc_register() is called in rknpu_drv.c,
+#    creating /dev/rknpu.  librknnrt.so v2.3.x opens /dev/rknpu and submits
+#    inference jobs via the BSP ioctl interface (type='r').  With DRM_GEM only,
+#    the driver creates /dev/dri/renderD* and /dev/dri/card* which librknnrt
+#    cannot use.
+#    The DRM device is still registered (drm_dev_register is not conditional),
+#    so /sys/bus/platform/drivers/RKNPU/fdab0000.rknpu/drm/ still exists for
+#    device-plugin discovery.
+#
+# 4. linux/rk-dma-heap.h stub is provided in src/include/compat/linux/.
+#    The rk-dma-heap API is Rockchip BSP-only and absent from mainline 6.x.
+#    The stub supplies static inline no-ops so the DMA_HEAP code path compiles;
+#    heap allocation fails gracefully at runtime (rk_dma_heap_find returns NULL).
 
 obj-m := rknpu.o
 rknpu-y := src/rknpu_drv.o src/rknpu_gem.o src/rknpu_fence.o \
@@ -28,7 +39,6 @@ rknpu-y := src/rknpu_drv.o src/rknpu_gem.o src/rknpu_fence.o \
 
 ccflags-y += -I$(src)/src/include
 ccflags-y += -I$(src)/src/include/compat
-ccflags-y += -DCONFIG_ROCKCHIP_RKNPU_DRM_GEM
 ccflags-y += -DCONFIG_ROCKCHIP_RKNPU_DMA_HEAP
 ccflags-y += -DCONFIG_ROCKCHIP_RKNPU_DEBUG_FS
 ccflags-y += -DCONFIG_ROCKCHIP_RKNPU_FENCE

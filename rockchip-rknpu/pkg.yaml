@@ -40,6 +40,12 @@ steps:
         # invalidated deterministically (sed on a cached layer is invisible).
         cp /pkg/files/Kbuild ./Kbuild
 
+        # Install the rk-dma-heap.h compat stub so the DMA_HEAP code path
+        # compiles against a mainline kernel that lacks Rockchip BSP headers.
+        # The existing -I$(src)/src/include/compat ccflag picks it up first.
+        mkdir -p src/include/compat/linux
+        cp /pkg/files/rk-dma-heap.h src/include/compat/linux/rk-dma-heap.h
+
         # Add MODULE_DEVICE_TABLE so udev autoloads rknpu.ko when the kernel
         # reports a DT device with compatible = "rockchip,rk3588-rknpu".
         # Without this, modules.alias has no "of:" entry and udevd never
