@@ -56,15 +56,7 @@ steps:
         # The real NPU platform device has an identical DMA configuration
         # (of_dma_configure is called during probe), so dma_sync_single_range_*
         # behaves identically.
-        python3 -c "
-import sys
-d = open('src/rknpu_gem.c').read()
-assert 'rknpu_dev->fake_dev' in d, 'PATCH FAILED: fake_dev not found in rknpu_gem.c'
-d = d.replace('rknpu_dev->fake_dev', 'rknpu_dev->dev')
-assert 'rknpu_dev->fake_dev' not in d, 'PATCH FAILED: fake_dev still present'
-open('src/rknpu_gem.c', 'w').write(d)
-sys.exit(0)
-"
+        python3 -c "import base64,sys; exec(base64.b64decode(b'aW1wb3J0IHN5cwpkID0gb3Blbignc3JjL3JrbnB1X2dlbS5jJykucmVhZCgpCmFzc2VydCAncmtucHVfZGV2LT5mYWtlX2RldicgaW4gZCwgJ1BBVENIIEZBSUxFRDogZmFrZV9kZXYgbm90IGZvdW5kIGluIHJrbnB1X2dlbS5jJwpkID0gZC5yZXBsYWNlKCdya25wdV9kZXYtPmZha2VfZGV2JywgJ3JrbnB1X2Rldi0+ZGV2JykKYXNzZXJ0ICdya25wdV9kZXYtPmZha2VfZGV2JyBub3QgaW4gZCwgJ1BBVENIIEZBSUxFRDogZmFrZV9kZXYgc3RpbGwgcHJlc2VudCcKb3Blbignc3JjL3JrbnB1X2dlbS5jJywgJ3cnKS53cml0ZShkKQpzeXMuZXhpdCgwKQo=').decode())"
 
         # Add MODULE_DEVICE_TABLE so udev autoloads rknpu.ko when the kernel
         # reports a DT device with compatible = "rockchip,rk3588-rknpu".
