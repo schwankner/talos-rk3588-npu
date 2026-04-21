@@ -1158,4 +1158,83 @@ Applied in `rockchip-rknpu/pkg.yaml` as a Python source patch during extension b
 
 ---
 
+## Bug 37: /dev/rknpu absent despite -DCONFIG_ROCKCHIP_RKNPU_DMA_HEAP in Kbuild
+
+**Symptom:** The node boots, `rknpu.ko` loads, but `/dev/rknpu` does not exist.
+`dmesg` shows `[drm] Initialized rknpu ... for fdab0000.rknpu on minor 0` (DRM_GEM path
+active instead of DMA_HEAP).  `nm rknpu.ko` shows `U drm_dev_register`, no `misc_register`.
+
+**Root cause (two separate issues found):**
+
+1. **BuildKit registry cache replay.**  The bldr build pipeline caches compilation
+   output in a remote OCI registry (`ghcr.io/.../build-cache`).  When neither the
+   source tarball URL/hash nor the prepare-step shell commands change, BuildKit
+   returns a cache hit and replays the previous layer — including the previously
+   compiled `.ko` — without recompiling.  Adding `-DCONFIG_ROCKCHIP_RKNPU_DMA_HEAP`
+   to `ccflags-y` in `Kbuild` changes a *file* copied during prepare, but if that
+   file copy command is itself cached (layer hash unchanged), the subsequent build
+   step also hits the cache and serves the old binary.
+
+   **Fix:** Change the prepare-step shell commands to include something new (e.g. add
+   a diagnostic `grep` or a new `cp` command).  This invalidates the prepare layer
+   hash → cache miss → fresh compilation.
+
+2. **GCC `-U` flag ordering vs `-include` files.**  GCC processes all `-D`/`-U`
+   command-line flags *before* processing any `-include` files.  If `autoconf.h`
+   (loaded via KBUILD_CFLAGS `-include linux/kconfig.h`) defines
+   `CONFIG_ROCKCHIP_RKNPU_DRM_GEM`, a bare `-UCONFIG_ROCKCHIP_RKNPU_DRM_GEM` in
+   `ccflags-y` fires before `autoconf.h` is read and is overridden by the `#define`
+   in the included file.  The `-U` flag is silently lost.
+
+   **Fix (defensive):** Add a force-include header via ccflags-y that fires AFTER
+   `linux/kconfig.h` (because ccflags-y appends after KBUILD_CFLAGS in the GCC
+   invocation) and contains a source-level `#undef CONFIG_ROCKCHIP_RKNPU_DRM_GEM`.
+   Implemented as `src/include/compat/rknpu_build_config.h`, added to Kbuild via:
+   `ccflags-y += -include $(src)/src/include/compat/rknpu_build_config.h`
+
+   Note: in practice the Talos `a92bed5` pkgs kernel does NOT define
+   `CONFIG_ROCKCHIP_RKNPU_DRM_GEM` in `autoconf.h`.  Issue 2 was latent; Issue 1
+   (cache replay) was the actual cause of the symptom.
+
+**Diagnostic added to pkg.yaml prepare step:**
+```bash
+grep -i "RKNPU" /src/include/generated/autoconf.h || echo "(no RKNPU entries in autoconf.h)"
+```
+
+**Confirmed fix:** `nm rknpu.ko` shows `U misc_register` (DMA_HEAP path), no
+`drm_dev_register`.  Module size changed from 3,127,394 to 3,452,922 bytes confirming
+fresh compilation.  `/dev/rknpu` appears on the node after module load.
+
+---
+
+## Bug 38: Kubernetes device plugin reports rockchip.com/npu capacity 0 despite /dev/rknpu existing
+
+**Symptom:** `/dev/rknpu` exists on the node, rknpu.ko is loaded, but
+`kubectl get node -o json` shows `rockchip.com/npu: 0`.  The device plugin pod
+repeatedly exits with code 0 (status `Completed`) and restarts.  Logs show:
+```
+Waiting for rknpu DRM nodes (1/12): rknpu sysfs not found
+(/sys/bus/platform/drivers/RKNPU/fdab0000.rknpu/drm): no such file or directory
+```
+
+**Root cause:** The device plugin was written for DRM_GEM mode, which calls
+`drm_dev_register()` and creates a DRM sysfs subtree at
+`/sys/bus/platform/drivers/RKNPU/fdab0000.rknpu/drm/` with `renderD*` and `card*`
+entries.  In DMA_HEAP mode (Bug 37 fix), `drm_dev_register` is not called
+(`CONFIG_ROCKCHIP_RKNPU_DRM_GEM` is guarded in `rknpu_drv.c` at line ~852).
+The DRM sysfs path never exists.  The plugin waits 60 s for it, fails with exit 0,
+and kubelet restarts it — stuck in a loop with capacity always 0.
+
+The Kbuild comment claiming "DRM device is still registered (drm_dev_register is
+not conditional)" was incorrect.
+
+**Fix:** Rewrite `discoverNPU()` in the device plugin to stat `/dev/rknpu` directly.
+Remove all DRM render/card node scaffolding from `discoverNPU()`, `writeCDISpec()`,
+and `Allocate()`.  `librknnrt.so` v2.3.x only needs `/dev/rknpu` (BSP ioctl) and
+`/dev/dma_heap/system` (DMA buf allocation) — no DRM nodes.
+
+Applied in `plugins/rk3588-npu-device-plugin/main.go`.
+
+---
+
 *Add new bugs above this line, most recent first.*
