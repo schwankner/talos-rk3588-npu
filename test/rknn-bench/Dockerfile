@@ -18,6 +18,8 @@
 #   python:3.11-slim-bullseye (Debian 11/glibc 2.31): python3.11 pre-baked in
 #     base layers (no BuildKit diff/truncation), glibc 2.31 works on this kernel.
 FROM python:3.11-slim-bullseye
+# v20: change layer chain IDs to invalidate 0-byte snapshots from unclean-shutdown corruption.
+LABEL "bench.build"="v20"
 
 # gcc + libc6-dev are only needed to build the LD_PRELOAD shim; purged afterward.
 RUN apt-get update && apt-get install -y --no-install-recommends \
