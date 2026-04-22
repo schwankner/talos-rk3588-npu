@@ -1275,4 +1275,40 @@ Applied in `test/rknn-bench/Dockerfile`, bench image bumped to v18.
 
 ---
 
+## Bug 40: init_runtime() kernel panic — RKNPU_GET_VOLT NULL dereference (no regulator in DT)
+
+**Symptom:** `rknn.init_runtime(core_mask=NPU_CORE_AUTO)` causes an immediate kernel
+panic and node reboot. All output before `init_runtime()` (import, `RKNNLite()`,
+`load_rknn()`) succeeds normally. Stdout is empty because data was in the kernel pipe
+buffer and lost during panic. Diagnosed by writing to a hostPath-mounted file with
+`os.fsync()` — hostlog showed "calling init_runtime..." as the last entry.
+
+**Root cause:** `librknnrt.so` v2.3.x calls the `RKNPU_GET_VOLT` ioctl during
+`init_runtime()` to query the current NPU supply voltage. In `rknpu_action()`:
+```c
+case RKNPU_GET_VOLT:
+    args->value = regulator_get_voltage(rknpu_dev->vdd);
+```
+On mainline kernel, the NPU DT node has no `rknpu-supply` regulator entry. Probe
+calls `devm_regulator_get_optional(dev, "rknpu")` → returns `-ENODEV` → sets
+`rknpu_dev->vdd = NULL`. Passing NULL to `regulator_get_voltage()` dereferences
+`regulator->rdev` in the kernel regulator framework → NULL pointer dereference →
+kernel panic.
+
+All other `rknpu_action()` cases are safe: `bw_priority_base` has a NULL guard,
+`sram_mm` has a NULL guard, and clocks are always non-NULL after successful probe.
+The `RKNPU_GET_FREQ` case calls `clk_get_rate(clks[0].clk)` which is safe (clocks
+are required, not optional; probe fails if they're absent).
+
+**Fix:** Guard the `regulator_get_voltage()` call with a NULL check:
+```c
+case RKNPU_GET_VOLT:
+    args->value = rknpu_dev->vdd ?
+        regulator_get_voltage(rknpu_dev->vdd) : 0;
+```
+
+Applied as a prepare-step patch in `rockchip-rknpu/pkg.yaml`.
+
+---
+
 *Add new bugs above this line, most recent first.*
