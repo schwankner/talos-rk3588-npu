@@ -31,9 +31,15 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: test/rknn-bench
           platforms: linux/arm64
           push: true
+          # provenance=false: suppress OCI provenance attestation manifest.
+          # With provenance enabled, buildx creates an OCI image index that
+          # contains both the arm64 image and an "unknown/unknown" attestation
+          # layer.  containerd on Talos/RK3588 can select the attestation
+          # entry instead of the arm64 image, causing "exec format error".
+          provenance: false
           tags: ghcr.io/schwankner/rk3588-rknn-bench:${{ inputs.tag }}
