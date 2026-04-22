@@ -3,9 +3,14 @@
 # Runs ResNet18 inferences WITHOUT the NPU resource as a CPU baseline.
 # librknnrt.so falls back to ARM CPU execution.
 #
-# This pod does NOT get CDI injection (no rockchip.com/npu limit),
-# so /dev/dri/renderD128 is absent → rknn falls back to CPU automatically.
+# This pod does NOT request rockchip.com/npu, so /dev/rknpu is absent
+# and librknnrt.so falls back to CPU automatically.
 # librknnrt.so is supplied via the hostPath volume below.
+#
+# procMount: Unmasked + hostUsers: false: rknnlite's Cython init_runtime()
+# opens /proc/device-tree/compatible at the C level to detect the SoC —
+# even in CPU mode.  Without this the C-level open() fails and init_runtime
+# returns -1.
 #
 # Expected result: ~5-20 fps (50-200 ms/inference) — 10-50x slower than NPU
 apiVersion: batch/v1
@@ -18,15 +23,17 @@ spec:
   template:
     spec:
       restartPolicy: Never
+      hostUsers: false
       containers:
         - name: bench
-          image: ghcr.io/schwankner/rknn-bench:v2
+          image: ghcr.io/schwankner/rk3588-rknn-bench:v15
           imagePullPolicy: Always
           args: ["--mode", "cpu", "--iterations", "50"]
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
+            procMount: Unmasked
           # Manually bind librknnrt.so so the RKNN runtime can initialise
           # (without CDI it isn't injected automatically)
           volumeMounts:

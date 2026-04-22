@@ -6,10 +6,10 @@ Loads the pre-converted resnet18_for_rk3588.rknn model and runs N inferences,
 reporting latency and throughput.  Designed to run inside a Kubernetes pod:
 
   NPU mode:  pod requests rockchip.com/npu=1
-             → CDI injects /dev/dri/renderD128 + /usr/lib/librknnrt.so
+             → CDI injects /dev/rknpu + /usr/lib/librknnrt.so
              → init_runtime(core_mask=NPU_CORE_AUTO)
 
-  CPU mode:  no resource request (or fallback when DRM device absent)
+  CPU mode:  no resource request (or explicit --mode cpu)
              → init_runtime() falls back to ARM CPU via librknnrt.so
 
 Usage:
@@ -78,9 +78,9 @@ def run_bench(mode: str, iterations: int) -> None:
     print(f"=== RKNN Benchmark  mode={mode}  iterations={iterations} ===", flush=True)
     print(f"[DBG] run_bench entered", file=sys.stderr, flush=True)
 
-    drm_nodes = [p for p in ["/dev/dri/renderD128", "/dev/dri/renderD129"]
-                 if os.path.exists(p)]
-    lib_ok = os.path.exists("/usr/lib/librknnrt.so")
+    rknpu_dev = "/dev/rknpu"
+    rknpu_ok  = os.path.exists(rknpu_dev)
+    lib_ok    = os.path.exists("/usr/lib/librknnrt.so")
 
     proc_dt = "/proc/device-tree"
     try:
@@ -97,13 +97,14 @@ def run_bench(mode: str, iterations: int) -> None:
         except OSError as _e2:
             direct = f"MISSING ({_e2.strerror})"
         compat_val = f"MISSING ({_e.strerror})  /sys/fw={direct}  /proc/dt→{dt_link}"
-    print(f"  DRM render node : {drm_nodes[0] if drm_nodes else 'NOT FOUND'}")
-    if drm_nodes:
-        print(f"  DRM open()      : {probe_device(drm_nodes[0])}")
+    print(f"  /dev/rknpu      : {'present' if rknpu_ok else 'NOT FOUND'}", end="")
+    if rknpu_ok:
+        print(f"  open()={probe_device(rknpu_dev)}", end="")
+    print()
     dma_heap = "/dev/dma_heap/system"
     print(f"  dma_heap/system : {'present' if os.path.exists(dma_heap) else 'MISSING'}", end="")
     if os.path.exists(dma_heap):
-        print(f" open()={probe_device(dma_heap)}", end="")
+        print(f"  open()={probe_device(dma_heap)}", end="")
     print()
     print(f"  librknnrt.so    : {'present' if lib_ok else 'MISSING'}")
     print(f"  /proc/dt/compat : {compat_val}")
@@ -113,8 +114,8 @@ def run_bench(mode: str, iterations: int) -> None:
                  "  In NPU pods: CDI injects it automatically.\n"
                  "  In CPU pods: add a hostPath volume for /usr/lib/librknnrt.so.")
 
-    if mode == "npu" and not drm_nodes:
-        sys.exit("ERROR: NPU mode but no /dev/dri/renderD* found.\n"
+    if mode == "npu" and not rknpu_ok:
+        sys.exit("ERROR: NPU mode but /dev/rknpu not found.\n"
                  "  Add 'rockchip.com/npu: 1' to resources.limits.")
 
     print(f"[DBG] pre-RKNNLite", file=sys.stderr, flush=True)

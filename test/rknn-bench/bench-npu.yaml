@@ -1,7 +1,7 @@
 ---
 # RKNN NPU benchmark Job
 # Runs 200 ResNet18 inferences on the RK3588 NPU via CDI injection.
-# CDI provides: /dev/dri/renderD128, /dev/dri/card0, /usr/lib/librknnrt.so
+# CDI provides: /dev/rknpu (BSP misc device), /usr/lib/librknnrt.so
 #
 # SoC detection: rknnlite's Cython code opens /proc/device-tree/compatible at
 # the C level (bypasses Python builtins.open patches). procMount: Unmasked +
@@ -22,7 +22,7 @@ spec:
       hostUsers: false
       containers:
         - name: bench
-          image: ghcr.io/schwankner/rk3588-rknn-bench:v14
+          image: ghcr.io/schwankner/rk3588-rknn-bench:v15
           imagePullPolicy: Always
           args: ["--mode", "npu", "--iterations", "200"]
           env:
