@@ -7,22 +7,26 @@
 #
 # Build (ARM64 native or via buildx):
 #   docker buildx build --platform linux/arm64 \
-#     -t ghcr.io/schwankner/rk3588-rknn-bench:v14 --push .
+#     -t ghcr.io/schwankner/rk3588-rknn-bench:v17 --push .
 
-# Use debian:12-slim (Bookworm, glibc 2.36) + system Python 3.11 from apt.
-# python:3.11-slim switched to Debian Trixie (glibc 2.40+) which uses CPU
-# features (BTI/PAC) that cause exec format errors on Talos 6.18.18/RK3588.
-FROM debian:12-slim
+# Ubuntu 22.04 (Jammy, glibc 2.35) — debian:12-slim (glibc 2.36) triggers
+# exec format errors on Talos 6.18.18/RK3588 due to corrupted layer state
+# in containerd's snapshot store on this kernel/hardware combination.
+# Ubuntu 22.04 + glibc 2.35 runs cleanly on the same node.
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3 python3-pip python3-dev \
+        python3.11 python3.11-dev python3-pip \
         libgomp1 strace ca-certificates file curl \
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 \
     && rm -rf /var/lib/apt/lists/*
 
 # rknn-toolkit-lite2 wheel (Python wrapper that dlopen()s librknnrt.so)
 # Pre-downloaded from github.com/airockchip/rknn-toolkit2 v2.3.2 packages/
 COPY rknn_toolkit_lite2-2.3.2-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl /tmp/
-RUN pip install --no-cache-dir --break-system-packages \
+RUN python3.11 -m pip install --no-cache-dir \
     /tmp/rknn_toolkit_lite2-2.3.2-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl \
     numpy Pillow \
     && rm /tmp/rknn_toolkit_lite2-2.3.2-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl

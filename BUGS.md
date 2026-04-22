@@ -1237,4 +1237,39 @@ Applied in `plugins/rk3588-npu-device-plugin/main.go`.
 
 ---
 
+## Bug 39: exec format error / EIO for glibc 2.36 containers on Talos 6.18.18/RK3588
+
+**Symptom:** Pods using `debian:12-slim` (glibc 2.36) fail immediately with:
+```
+exec /bin/sh: exec format error
+```
+or
+```
+exec /usr/bin/python3: input/output error
+```
+Pods using `alpine` (musl) or `ubuntu:22.04` (glibc 2.35) run successfully on the
+same node.
+
+**Root cause:** The Debian 12 ARM64 base layer
+(`sha256:46ac7a0b9811e518f6b5a0d52940c913a1a560a8f78b82267804914e50244d2d`)
+becomes corrupted in containerd's snapshot store on Talos 6.18.18/RK3588 after
+a bad pull.  Any subsequent image sharing this layer — including standalone
+`debian:12-slim` pulls with `imagePullPolicy: Always` — inherits the corrupt
+snapshot.  The corruption appears to be triggered by a previous failed pull of the
+bench image when OCI provenance attestation was enabled (Bug 36-era), which left
+inconsistent state in the overlayfs snapshot store.
+
+Additionally, glibc 2.36 itself may use CPU features or kernel interfaces that
+behave differently on 6.18.18-talos on RK3588 vs. other kernels; glibc 2.35
+(Ubuntu 22.04) is confirmed working.
+
+**Fix:** Switch `FROM debian:12-slim` → `FROM ubuntu:22.04` in the bench Dockerfile.
+Ubuntu 22.04 uses glibc 2.35 and has different layer digests, bypassing the corrupted
+snapshot.  Python 3.11 is installed explicitly (`apt-get install python3.11`) with
+`update-alternatives` to make it the default `python3`.
+
+Applied in `test/rknn-bench/Dockerfile`, bench image bumped to v17.
+
+---
+
 *Add new bugs above this line, most recent first.*
