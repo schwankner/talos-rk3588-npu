@@ -19,9 +19,9 @@
 #     base layers (no BuildKit diff/truncation), glibc 2.31 works on this kernel.
 FROM python:3.11-slim-bullseye
 
-# gcc is only needed to build the LD_PRELOAD shim; purged afterward.
+# gcc + libc6-dev are only needed to build the LD_PRELOAD shim; purged afterward.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libgomp1 strace ca-certificates file curl gcc \
+        libgomp1 strace ca-certificates file curl gcc libc6-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # dt_compat_shim: intercepts the C-level open("/proc/device-tree/compatible")
