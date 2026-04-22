@@ -3,10 +3,11 @@
 # Runs 200 ResNet18 inferences on the RK3588 NPU via CDI injection.
 # CDI provides: /dev/rknpu (BSP misc device), /usr/lib/librknnrt.so
 #
-# SoC detection: rknnlite's Cython code opens /proc/device-tree/compatible at
-# the C level (bypasses Python builtins.open patches). procMount: Unmasked +
-# hostUsers: false unmasks /proc so the real device-tree file is accessible.
-# Requires Talos kernel 6.18+ (MOUNT_ATTR_IDMAP tmpfs support).
+# SoC detection: rknnlite's Cython init_runtime() opens
+# /proc/device-tree/compatible at the C level.  The image ships a
+# dt_compat_shim.so (LD_PRELOAD) that intercepts this specific open()
+# and returns the RK3588 compatible string from a memfd — no
+# procMount:Unmasked or hostUsers:false required.
 #
 # Expected result: ~100-300 fps (< 10 ms/inference)
 apiVersion: batch/v1
@@ -19,10 +20,9 @@ spec:
   template:
     spec:
       restartPolicy: Never
-      hostUsers: false
       containers:
         - name: bench
-          image: ghcr.io/schwankner/rk3588-rknn-bench:v18
+          image: ghcr.io/schwankner/rk3588-rknn-bench:v19
           imagePullPolicy: Always
           args: ["--mode", "npu", "--iterations", "200"]
           env:
@@ -32,7 +32,6 @@ spec:
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
-            procMount: Unmasked
           resources:
             limits:
               rockchip.com/npu: "1"

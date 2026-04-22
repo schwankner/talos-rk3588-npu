@@ -7,22 +7,35 @@
 #
 # Build (ARM64 native or via buildx):
 #   docker buildx build --platform linux/arm64 \
-#     -t ghcr.io/schwankner/rk3588-rknn-bench:v18 --push .
+#     -t ghcr.io/schwankner/rk3588-rknn-bench:v19 --push .
 #
 # Base image selection history:
 #   python:3.11-slim (Trixie/glibc 2.40+): BTI/PAC exec format errors on RK3588
-#   debian:12-slim (Bookworm/glibc 2.36): Debian 12 ARM64 causes exec format errors
-#     on Talos 6.18.18/RK3588 (kernel ↔ Debian glibc 2.36 ABI incompatibility)
+#   debian:12-slim (Bookworm/glibc 2.36): Debian 12 ARM64 ELF incompatible with
+#     Talos 6.18.18/RK3588 kernel (exec format error on all Debian 12 containers)
 #   ubuntu:22.04 (glibc 2.35): python3.11 binary zero-truncated to 0 bytes by
 #     BuildKit layer-diff bug when installing large binaries via apt in a RUN step
-#   python:3.11-slim-bullseye (Debian 11/glibc 2.31): python3.11 is pre-baked in the
-#     base image layers (no BuildKit diff, no truncation), glibc 2.31 works on this
-#     kernel.  Confirmed working on Talos 6.18.18/RK3588.
+#   python:3.11-slim-bullseye (Debian 11/glibc 2.31): python3.11 pre-baked in
+#     base layers (no BuildKit diff/truncation), glibc 2.31 works on this kernel.
 FROM python:3.11-slim-bullseye
 
+# gcc is only needed to build the LD_PRELOAD shim; purged afterward.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libgomp1 strace ca-certificates file curl \
+        libgomp1 strace ca-certificates file curl gcc \
     && rm -rf /var/lib/apt/lists/*
+
+# dt_compat_shim: intercepts the C-level open("/proc/device-tree/compatible")
+# that rknnlite's Cython init_runtime() uses for SoC detection.  Without this
+# shim, pods would need procMount:Unmasked + hostUsers:false (user namespaces),
+# which breaks IDMAP mounts for hostPath volumes and kubelet log collection.
+COPY dt_compat_shim.c /tmp/
+RUN gcc -shared -fPIC -O2 -o /usr/lib/dt_compat_shim.so /tmp/dt_compat_shim.c -ldl \
+    && rm /tmp/dt_compat_shim.c \
+    && apt-get purge -y gcc && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+
+# Activate the shim for all processes in the container (build-time ENV is
+# only set in the final image, not during earlier RUN steps).
+ENV LD_PRELOAD=/usr/lib/dt_compat_shim.so
 
 # rknn-toolkit-lite2 wheel (Python wrapper that dlopen()s librknnrt.so)
 # Pre-downloaded from github.com/airockchip/rknn-toolkit2 v2.3.2 packages/
