@@ -7,26 +7,27 @@
 #
 # Build (ARM64 native or via buildx):
 #   docker buildx build --platform linux/arm64 \
-#     -t ghcr.io/schwankner/rk3588-rknn-bench:v17 --push .
-
-# Ubuntu 22.04 (Jammy, glibc 2.35) — debian:12-slim (glibc 2.36) triggers
-# exec format errors on Talos 6.18.18/RK3588 due to corrupted layer state
-# in containerd's snapshot store on this kernel/hardware combination.
-# Ubuntu 22.04 + glibc 2.35 runs cleanly on the same node.
-FROM ubuntu:22.04
-
-ENV DEBIAN_FRONTEND=noninteractive
+#     -t ghcr.io/schwankner/rk3588-rknn-bench:v18 --push .
+#
+# Base image selection history:
+#   python:3.11-slim (Trixie/glibc 2.40+): BTI/PAC exec format errors on RK3588
+#   debian:12-slim (Bookworm/glibc 2.36): Debian 12 ARM64 causes exec format errors
+#     on Talos 6.18.18/RK3588 (kernel ↔ Debian glibc 2.36 ABI incompatibility)
+#   ubuntu:22.04 (glibc 2.35): python3.11 binary zero-truncated to 0 bytes by
+#     BuildKit layer-diff bug when installing large binaries via apt in a RUN step
+#   python:3.11-slim-bullseye (Debian 11/glibc 2.31): python3.11 is pre-baked in the
+#     base image layers (no BuildKit diff, no truncation), glibc 2.31 works on this
+#     kernel.  Confirmed working on Talos 6.18.18/RK3588.
+FROM python:3.11-slim-bullseye
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3.11 python3.11-dev python3-pip \
         libgomp1 strace ca-certificates file curl \
-    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 \
     && rm -rf /var/lib/apt/lists/*
 
 # rknn-toolkit-lite2 wheel (Python wrapper that dlopen()s librknnrt.so)
 # Pre-downloaded from github.com/airockchip/rknn-toolkit2 v2.3.2 packages/
 COPY rknn_toolkit_lite2-2.3.2-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl /tmp/
-RUN python3.11 -m pip install --no-cache-dir \
+RUN pip install --no-cache-dir \
     /tmp/rknn_toolkit_lite2-2.3.2-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl \
     numpy Pillow \
     && rm /tmp/rknn_toolkit_lite2-2.3.2-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl

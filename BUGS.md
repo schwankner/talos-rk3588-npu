@@ -1237,38 +1237,41 @@ Applied in `plugins/rk3588-npu-device-plugin/main.go`.
 
 ---
 
-## Bug 39: exec format error / EIO for glibc 2.36 containers on Talos 6.18.18/RK3588
+## Bug 39: exec format error for Debian ARM64 containers on Talos 6.18.18/RK3588
 
-**Symptom:** Pods using `debian:12-slim` (glibc 2.36) fail immediately with:
+**Symptom:** Pods using any Debian-based image (glibc 2.36) fail immediately:
 ```
 exec /bin/sh: exec format error
 ```
-or
-```
-exec /usr/bin/python3: input/output error
-```
-Pods using `alpine` (musl) or `ubuntu:22.04` (glibc 2.35) run successfully on the
-same node.
+This affects `debian:12-slim`, `debian:bookworm-slim`, `python:3.11-slim-bookworm`,
+and any image built FROM them.  Pods using `alpine` (musl), `ubuntu:22.04`
+(glibc 2.35), or `ubuntu:24.04` (glibc 2.39) run successfully on the same node.
 
-**Root cause:** The Debian 12 ARM64 base layer
-(`sha256:46ac7a0b9811e518f6b5a0d52940c913a1a560a8f78b82267804914e50244d2d`)
-becomes corrupted in containerd's snapshot store on Talos 6.18.18/RK3588 after
-a bad pull.  Any subsequent image sharing this layer — including standalone
-`debian:12-slim` pulls with `imagePullPolicy: Always` — inherits the corrupt
-snapshot.  The corruption appears to be triggered by a previous failed pull of the
-bench image when OCI provenance attestation was enabled (Bug 36-era), which left
-inconsistent state in the overlayfs snapshot store.
+**Root cause:** A kernel ABI incompatibility between Talos 6.18.18-talos and
+Debian 12 Bookworm's ARM64 userland.  The specific mechanism is unclear — ELF
+headers and flags are identical between Ubuntu 22.04 and Debian 12 ARM64 binaries
+(same magic, same ABI, same machine type, same e_flags=0x0).  It is NOT glibc 2.36
+per se (Ubuntu 24.04 with glibc 2.39 works fine).  Best hypothesis: Debian 12's
+gcc/binutils toolchain emits an AArch64-specific ELF note (`GNU_PROPERTY_AARCH64_
+FEATURE_PAUTH_SCHEMA` or similar) that the Talos kernel rejects, while Ubuntu
+compiles the same packages without that note.
 
-Additionally, glibc 2.36 itself may use CPU features or kernel interfaces that
-behave differently on 6.18.18-talos on RK3588 vs. other kernels; glibc 2.35
-(Ubuntu 22.04) is confirmed working.
+**Additional complication (ubuntu:22.04 attempt, Bug 39b):**
+Switching `FROM debian:12-slim` → `FROM ubuntu:22.04` (glibc 2.35) fixed the exec
+format error, but `/usr/bin/python3.11` installed via `apt-get install python3.11`
+was zero-truncated to 0 bytes in the OCI image by a BuildKit layer-diff bug.  This
+affects large binaries (~6.5 MB) installed via apt in a `RUN` step when the native
+ARM64 GitHub Actions runner (`ubuntu-24.04-arm`) uses Docker BuildKit.  The binary
+is correct in the running build container but the exported OCI layer records it as
+0 bytes.  Both `python3.10` and `python3.11` were zero-truncated.
 
-**Fix:** Switch `FROM debian:12-slim` → `FROM ubuntu:22.04` in the bench Dockerfile.
-Ubuntu 22.04 uses glibc 2.35 and has different layer digests, bypassing the corrupted
-snapshot.  Python 3.11 is installed explicitly (`apt-get install python3.11`) with
-`update-alternatives` to make it the default `python3`.
+**Fix:** Use `FROM python:3.11-slim-bullseye` (Debian 11/Bullseye, glibc 2.31).
+- Python 3.11 is already baked into the base image layers — no BuildKit diff, no
+  zero-truncation.
+- Debian 11 ARM64 (glibc 2.31) executes cleanly on Talos 6.18.18/RK3588.
+- Confirmed: `python:3.11-slim-bullseye` runs `Python 3.11.13 aarch64` successfully.
 
-Applied in `test/rknn-bench/Dockerfile`, bench image bumped to v17.
+Applied in `test/rknn-bench/Dockerfile`, bench image bumped to v18.
 
 ---
 

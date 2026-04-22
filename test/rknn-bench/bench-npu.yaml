@@ -22,7 +22,7 @@ spec:
       hostUsers: false
       containers:
         - name: bench
-          image: ghcr.io/schwankner/rk3588-rknn-bench:v17
+          image: ghcr.io/schwankner/rk3588-rknn-bench:v18
           imagePullPolicy: Always
           args: ["--mode", "npu", "--iterations", "200"]
           env:
