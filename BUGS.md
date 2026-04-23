@@ -1481,4 +1481,86 @@ device, re-enabling clocks even if already suspended) followed by
 
 ---
 
+## Bug 46: init_runtime() hard lockup — fdab9000.iommu (Rockchip MMU) suspended in DMA path
+
+**Symptom:** `init_runtime()` causes an immediate hard CPU lockup (AXI bus hang, watchdog
+reset, ~6 min recovery).  Steps 0–3 of the RKNN step test pass; Step 4 (`init_runtime`)
+locks the machine.  No kernel oops, no pstore, no recovery — only BMC power cycle.
+
+Confirmed by two separate boots: the crash survived adding `iommu.passthrough=1` (which
+fixed the ARM SMMUv3 layer) because the Rockchip IOMMU hardware was still suspended.
+
+**Root cause (confirmed by sysfs):**
+
+RK3588 has two IOMMU layers in the NPU DMA path:
+
+1. **Rockchip IOMMU** (`fdab9000.iommu`, phandle `0x66`) — hardware MMU physically
+   embedded in the AXI path between the NPU DMA engine and the system bus.
+   `npu@fdab0000` DT node has `iommus = <0x66>`.
+
+2. **ARM SMMUv3** (`fc900000.iommu`, phandle `0x80`) — system-level IOMMU.
+   Adds `fdab0000.npu` to IOMMU group 7 (type = `DMA`).
+
+The `rknpu@fdab0000` DT node has **no** `iommus` property (only `npu@fdab0000` has it).
+rknpu therefore uses non-iommu mode (physical addresses, no IOMMU configuration).
+
+`fdab9000.iommu` was confirmed **suspended** (`runtime_status = suspended`) — its clocks
+are gated.  The Rockchip MMU hardware sits physically between the NPU DMA engine and the
+rest of the AXI bus.  With clocks off, it cannot route any DMA transaction; the NPU DMA
+engine stalls waiting for an acknowledgement that never arrives → AXI bus lockup.
+
+`iommu.passthrough=1` fixed the ARM SMMUv3 layer (group 7 type changed to `identity`)
+but the crash persisted because `fdab9000.iommu` was still suspended, blocking DMA
+before it even reached the SMMUv3.
+
+```bash
+# Confirmed fdab9000.iommu suspended
+talosctl read /sys/bus/platform/devices/fdab9000.iommu/power/runtime_status
+# → suspended
+
+# Confirmed iommus phandle on npu@fdab0000 = 0x66 = fdab9000.iommu
+talosctl read /proc/device-tree/npu@fdab0000/iommus | xxd  # → 00000066
+# ARM SMMUv3 phandle = 0x80 (different node)
+talosctl read /proc/device-tree/iommu@fc900000/phandle | xxd  # → 00000080
+```
+
+**Why Bug 45 / Bug 45v2 were ineffective:**
+
+Both patches used `of_parse_phandle(dev->of_node, "iommus", 0)` on `rknpu@fdab0000` to
+find the Rockchip IOMMU.  But `rknpu@fdab0000` has **no** `iommus` DT property.
+`of_parse_phandle()` returned NULL every time — `dev_warn("Bug 45: no iommus phandle in
+DT")` fired on every boot and the `pm_runtime_get_sync()` call in Bug 45v2 never ran.
+
+**Fix (two components, both required):**
+
+1. **`iommu.passthrough=1` kernel cmdline** (applied via `talosctl patch machineconfig`
+   + `talosctl upgrade --preserve`): sets ARM SMMUv3 group 7 to identity/passthrough so
+   physical addresses from rknpu's `dma_direct` allocations are not rejected by the SMMU.
+
+2. **Bug 46 driver patch** (in `rockchip-rknpu/pkg.yaml`): replaces the Bug 45 else-branch
+   `dev_warn` with code that finds `fdab9000.iommu` by platform-bus device name
+   (`bus_find_device_by_name()`) and calls `pm_runtime_get_sync()` +
+   `pm_runtime_get_noresume()` to keep it permanently active:
+
+```c
+/* Bug 46 */
+struct device *_rk_mmu =
+    bus_find_device_by_name(&platform_bus_type, NULL, "fdab9000.iommu");
+if (_rk_mmu) {
+    pm_runtime_get_sync(_rk_mmu);
+    pm_runtime_get_noresume(_rk_mmu);
+    dev_info(dev, "Bug 46: fdab9000.iommu held active\n");
+    put_device(_rk_mmu);
+}
+```
+
+With both fixes: physical addresses pass through fdab9000 (clocks on, bypass mode) and
+then through ARM SMMUv3 (passthrough domain) to reach DRAM.  DMA succeeds.
+
+**Long-term fix (TODO):** Add `iommus = <&rknpu_mmu>` to `rknpu@fdab0000` DT node via a
+Talos DT overlay.  This enables rknpu iommu-mode: the driver configures fdab9000 page
+tables, eliminating non-iommu mode entirely.  `iommu.passthrough=1` can then be removed.
+
+---
+
 *Add new bugs above this line, most recent first.*
