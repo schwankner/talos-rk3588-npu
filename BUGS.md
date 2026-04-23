@@ -1417,4 +1417,61 @@ Applied as a Python source patch in `rockchip-rknpu/pkg.yaml` (Bug 43 patch, aft
 
 ---
 
+## Bug 45: fdab9000.iommu clock-gates itself, hanging NPU DMA in init_runtime()
+
+**Symptom:** Node hard-locks (AXI bus hang, no kernel panic, empty pstore) when
+`init_runtime()` is called.  Step-test confirms crash is exactly at that call:
+
+```
+1776958765.338 STEP 4: init_runtime(core_mask=NPU_CORE_AUTO) -- crash likely here
+(node reboots here, no further log)
+```
+
+Both CPU mode and NPU mode `init_runtime()` crash identically, placing the bug in
+the shared init path rather than the NPU core selection path.
+
+**Root cause:** The `rockchip-iommu` driver for `fdab9000.iommu` (the NPU IOMMU)
+manages itself via `pm_runtime`.  When no driver holds a PM reference, the IOMMU
+driver's runtime suspend callback fires: it disables the IOMMU clocks via the clock
+framework (no SCMI; the IOMMU clocks are local gating clocks).  In non-iommu mode,
+`rknpu` never calls `iommu_attach_device()` or any IOMMU framework API, so the IOMMU
+usage count stays at 0 and the IOMMU enters `RPM_SUSPENDED` immediately after its own
+probe.  Confirmed via genpd summary:
+
+```
+nputop   on   0
+    fdab9000.iommu   suspended   0   SW    <- 0 consumers, clocks gated
+    genpd:0:fdab0000.rknpu   active   0   SW
+```
+
+The IOMMU hardware (`fdab9000`) sits physically between the NPU DMA engine and the
+memory interconnect.  When `init_runtime()` triggers the first `RKNPU_SUBMIT` ioctl
+(submitting the model init job), the NPU DMA engine tries to fetch the task descriptor
+from DRAM.  With the IOMMU hardware clock-gated, the DMA transaction cannot complete:
+the AXI bus hangs waiting for an acknowledgement that never arrives -- CPU hard lockup.
+
+The power domain (`nputop`) is ON; the bug is purely about the IOMMU clock being off,
+not about the power domain being off.
+
+**Fix:** During `rknpu_probe`, look up the IOMMU platform device via the DT `"iommus"`
+phandle and call `pm_runtime_get_noresume()` on it.  This permanently prevents the
+IOMMU from entering runtime suspend, keeping its clocks enabled for the lifetime of
+the rknpu driver.
+
+```c
+/* Bug 45 */
+struct device_node *_iommu_dn = of_parse_phandle(dev->of_node, "iommus", 0);
+if (_iommu_dn) {
+    struct platform_device *_iommu_pd = of_find_device_by_node(_iommu_dn);
+    if (_iommu_pd)
+        pm_runtime_get_noresume(&_iommu_pd->dev);
+    of_node_put(_iommu_dn);
+}
+```
+
+Applied as a Python source patch in `rockchip-rknpu/pkg.yaml` (Bug 45 patch, last in
+the prepare sequence, after Bug 40).
+
+---
+
 *Add new bugs above this line, most recent first.*
