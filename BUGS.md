@@ -1346,4 +1346,75 @@ Applied as an update to the Bug 26 prepare-step patch in `rockchip-rknpu/pkg.yam
 
 ---
 
+## Bug 44: GET_HW_VERSION hangs AXI bus — mainline DT uses "nputop" not "npu0"
+
+**Symptom:** Node hard-hangs at the `RKNPU_ACTION GET_HW_VERSION` ioctl (action=0)
+immediately after rknpu probe, even with Bug 41 applied.  No kernel panic; requires BMC
+power-cycle.  The crash is the first MMIO access to `0xfdab0000`.
+
+**Root cause:** The mainline RK3588 device tree (used by Talos/sbc-rockchip) uses
+`power-domain-names = "nputop", "npu1", "npu2"` for the rknpu device.  The BSP driver
+calls `dev_pm_domain_attach_by_name(dev, "npu0")` for the first domain.  On mainline
+kernels `"npu0"` is not in the DT → `dev_pm_domain_attach_by_name()` returns NULL →
+`genpd_dev_npu0 = NULL` → no virtual genpd consumer is created for the `nputop` domain.
+
+With no consumer holding the `nputop` genpd domain active, `genpd_sync_power_off()` fires
+after probe and powers it off.  The NPU top domain controls the register file at
+`0xfdab0000`.  Any MMIO read there (e.g. `rknpu_get_hw_version()`) finds no AXI response
+→ bus lockup → watchdog reset.
+
+Bug 41's `pm_runtime_get_sync(virt_dev)` calls for `npu1`/`npu2` succeeded (those names
+are correct in mainline DT), but there was no `virt_dev` for `nputop` to call `get_sync`
+on, leaving the top domain unmanaged.
+
+**Verification:**
+```bash
+# On-node: power-domain-names in mainline DT
+talosctl read /proc/device-tree/rknpu@fdab0000/power-domain-names
+# Output: nputop.npu1.npu2  (NUL-separated)  ← "npu0" is absent
+
+# genpd:0 = nputop domain has no consumer, shows suspended
+cat /sys/devices/platform/fdab0000.rknpu/power/runtime_status   # active
+cat /sys/devices/genpd:0:fdab0000.rknpu/power/runtime_status    # (absent — NULL virt_dev)
+```
+
+**Fix:** When `dev_pm_domain_attach_by_name(dev, "npu0")` returns NULL, fall back to
+`dev_pm_domain_attach_by_name(dev, "nputop")`.  This ensures the NPU top-level power
+domain is always attached regardless of whether the kernel DT uses BSP (`"npu0"`) or
+mainline (`"nputop"`) naming.
+
+Applied as a Python source patch in `rockchip-rknpu/pkg.yaml` (Bug 44 patch, after Bug 41).
+
+---
+
+## Bug 43: genpd virtual devices show "suspended" after probe despite Bug 41 get_sync
+
+**Symptom:** Even with Bug 41's `pm_runtime_get_sync(virt_dev)` in place, sysfs shows:
+```
+/sys/devices/genpd:1:fdab0000.rknpu/power/runtime_status → suspended
+/sys/devices/genpd:2:fdab0000.rknpu/power/runtime_status → suspended
+```
+The NPU sub-domains powered by `npu1` and `npu2` genpd devices are powered off after
+probe, causing AXI lockups when the driver accesses sub-domain registers.
+
+**Root cause:** `pm_runtime_get_sync(virt_dev)` sets `usage_count = 1` and
+`runtime_status = RPM_ACTIVE`.  However, genpd performs an internal cleanup step after
+`dev_pm_domain_attach_by_name()` returns: it calls `pm_runtime_put()` (or equivalent)
+on the virtual device as part of its internal bookkeeping when finalising the consumer
+link.  This decrements `usage_count` from 1 to 0 and schedules a runtime suspend.
+When the suspend fires, `runtime_status` → `RPM_SUSPENDED` and the domain powers off.
+
+This is the same mechanism as Bug 33 for the main device: `pm_runtime_get_sync` alone
+leaves a window where genpd cleanup can undo the active reference.
+
+**Fix:** Add `pm_runtime_get_noresume(virt_dev)` immediately after each
+`pm_runtime_get_sync(virt_dev)`.  This bumps `usage_count` to 2 before any cleanup
+can run.  The genpd cleanup decrements from 2 to 1 (not 0), autosuspend is never
+scheduled, and `runtime_status` stays `RPM_ACTIVE` permanently.  Mirrors Bug 33 which
+does the same for the main NPU device.
+
+Applied as a Python source patch in `rockchip-rknpu/pkg.yaml` (Bug 43 patch, after Bug 44).
+
+---
+
 *Add new bugs above this line, most recent first.*
