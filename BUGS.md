@@ -1309,6 +1309,41 @@ case RKNPU_GET_VOLT:
 
 Applied as a prepare-step patch in `rockchip-rknpu/pkg.yaml`.
 
+## Bug 41: init_runtime() fails (-1) / GET_HW_VERSION hangs AXI bus -- NPU genpd sub-domains powered off
+
+**Symptom:** `rknn.init_runtime()` returns -1 without crashing.  Directly calling the
+`RKNPU_ACTION GET_HW_VERSION` ioctl (action=0) causes an immediate hard hang with no
+kernel panic, requiring a BMC power-cycle to recover.  Both symptoms occur after the
+rknpu driver loads and probes successfully.
+
+**Root cause:** `pm_runtime_get_noresume(virt_dev)` (Bug 26 fix) only increments
+`usage_count` but leaves `runtime_status = RPM_SUSPENDED` on each genpd virtual
+device.  When `genpd_sync_power_off()` fires after probe completes, it checks
+`pm_runtime_suspended(dev)` for each consumer device.  Since `runtime_status` is
+`RPM_SUSPENDED`, genpd considers the device inactive and powers off all three NPU
+sub-domains (fdab0000.npu, fdac0000.npu, fdad0000.npu) via PMU register writes.
+
+After the domains are powered off, `rknpu_get_hw_version()` performs MMIO reads at
+0xfdab0000 with the power domain off.  The AXI bus receives no response, enters a
+lockup state, and the watchdog resets the system.  The librknnrt.so `init_runtime()`
+does not trigger the hard crash (it handles ioctl errors gracefully) but returns -1
+because no NPU sub-domain is accessible.
+
+**How identified:** ioctl bisect pod logged "BEFORE action=0 (GET_HW_VERSION)" to a
+hostPath-mounted file (with `os.fsync()`) immediately before the hard hang.  Node
+reboot confirmed action=0 as the crash point.  Cross-referencing with
+`rknpu_get_hw_version()` source confirmed it does bare MMIO reads without checking
+domain power state.
+
+**Fix:** Replace `pm_runtime_get_noresume(virt_dev)` with `pm_runtime_get_sync(virt_dev)`
+in the genpd sub-domain attachment section of probe (Bug 26 patch updated to Bug 41).
+`pm_runtime_get_sync()` calls `genpd_runtime_resume()` which invokes
+`rockchip_pd_power()` via PMU register writes (not SCMI -- devfreq/OPP is disabled
+by Bug 28).  The virtual device transitions to `RPM_ACTIVE`; `genpd_sync_power_off()`
+sees an active device and leaves the domain powered on.
+
+Applied as an update to the Bug 26 prepare-step patch in `rockchip-rknpu/pkg.yaml`.
+
 ---
 
 *Add new bugs above this line, most recent first.*
