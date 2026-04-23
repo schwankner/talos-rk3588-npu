@@ -1469,8 +1469,15 @@ if (_iommu_dn) {
 }
 ```
 
-Applied as a Python source patch in `rockchip-rknpu/pkg.yaml` (Bug 45 patch, last in
-the prepare sequence, after Bug 40).
+Applied as a Python source patch in `rockchip-rknpu/pkg.yaml` (Bug 45 + Bug 45v2
+patches, last in the prepare sequence, after Bug 40).
+
+**Bug 45v2 follow-up:** The initial Bug 45 patch used `pm_runtime_get_noresume()`
+which only increments usage_count but does NOT wake a device already in
+`RPM_SUSPENDED` state.  Since the IOMMU is already suspended by the time rknpu_probe
+runs, clocks remained off.  Fix: use `pm_runtime_get_sync()` (actively resumes the
+device, re-enabling clocks even if already suspended) followed by
+`pm_runtime_get_noresume()` (permanent anchor).  Mirrors the Bug 32/33 pattern.
 
 ---
 
