@@ -114,10 +114,10 @@ CDI device plugin (rockchip.com/npu: "1" in resources.limits)
 talosctl upgrade \
   --nodes <NODE_IP> \
   --talosconfig ./npu-test-talosconfig \
-  --image ghcr.io/schwankner/talos-rk3588-npu-installer-base:installer-v1.12.6 \
+  --image ghcr.io/schwankner/talos-rk3588-npu-installer-base:installer-v1.13.0-rc.0 \
   --preserve
 
-# 2. Apply machine config (adds NPU extensions + CDI containerd config)
+# 2. Apply machine config (adds NPU extensions)
 talosctl apply-config \
   --nodes <NODE_IP> \
   --talosconfig ./npu-test-talosconfig \
@@ -199,9 +199,9 @@ All versions are pinned in `scripts/common.sh`.
 
 | Component | Version | Notes |
 |-----------|---------|-------|
-| Talos Linux | v1.12.6 | |
-| Linux kernel | 6.18.18-talos | Mainline, OE4T patches |
-| siderolabs/pkgs | a92bed5 | Pinned to Talos v1.12.6 |
+| Talos Linux | v1.13.0-rc.0 | CDI enabled in containerd by default |
+| Linux kernel | 6.18.22-talos | Mainline, Clang/ThinLTO build |
+| siderolabs/pkgs | b121566 | Pinned to Talos v1.13.0-rc.0 |
 | rknpu driver | 0.9.10 | [w568w/rknpu-module](https://github.com/w568w/rknpu-module), mainline-compatible |
 | librknnrt.so | 2.3.2 | [airockchip/rknn-toolkit2](https://github.com/airockchip/rknn-toolkit2) |
 
@@ -236,10 +236,10 @@ Push to `main` with a change to `scripts/common.sh`:
 
 | Image | Tag format | Example |
 |-------|-----------|---------|
-| `ghcr.io/schwankner/rockchip-rknpu` | `<rknpu>-<kernel>` | `0.9.10-6.18.18-talos` |
-| `ghcr.io/schwankner/rockchip-rknn-libs` | `<rknn>-<kernel>` | `2.3.2-6.18.18-talos` |
-| `ghcr.io/schwankner/rk3588-npu-device-plugin` | `v<release>` | `v1.12.6-rknpu0.9.10` |
-| `ghcr.io/schwankner/talos-rk3588-npu-installer-base` | `installer-v<talos>` | `installer-v1.12.6` |
+| `ghcr.io/schwankner/rockchip-rknpu` | `<rknpu>-<kernel>` | `0.9.10-6.18.22-talos` |
+| `ghcr.io/schwankner/rockchip-rknn-libs` | `<rknn>-<kernel>` | `2.3.2-6.18.22-talos` |
+| `ghcr.io/schwankner/rk3588-npu-device-plugin` | `v<release>` | `v1.13.0-rc.0-rknpu0.9.10` |
+| `ghcr.io/schwankner/talos-rk3588-npu-installer-base` | `installer-v<talos>` | `installer-v1.13.0-rc.0` |
 
 > **Note:** Extensions are **baked into the installer** as squashfs blobs at build time.
 > They are not pulled from the registry at node boot. Always rebuild the installer after
@@ -251,8 +251,8 @@ Push to `main` with a change to `scripts/common.sh`:
 
 ### Prerequisites
 
-- Talos Linux v1.12.6 on your RK3588 board (via [factory.talos.dev](https://factory.talos.dev) with `sbc-rockchip` overlay)
-- `talosctl` v1.12.6, `kubectl`
+- Talos Linux v1.13.0-rc.0 on your RK3588 board (via [factory.talos.dev](https://factory.talos.dev) with `sbc-rockchip` overlay)
+- `talosctl` v1.13.0-rc.0, `kubectl`
 - Images are public on GHCR; no authentication needed to pull
 
 ### Step 1 — Upgrade to the NPU installer
@@ -264,31 +264,26 @@ The custom installer embeds the kernel whose module-signing key was used to buil
 talosctl upgrade \
   --nodes <NODE_IP> \
   --talosconfig ./your-talosconfig \
-  --image ghcr.io/schwankner/talos-rk3588-npu-installer-base:installer-v1.12.6 \
+  --image ghcr.io/schwankner/talos-rk3588-npu-installer-base:installer-v1.13.0-rc.0 \
   --preserve
 ```
 
-### Step 2 — Add system extensions and CDI to machine config
+### Step 2 — Add system extensions to machine config
 
 ```yaml
 machine:
   install:
     extensions:
-      - image: ghcr.io/schwankner/rockchip-rknpu:0.9.10-6.18.18-talos
-      - image: ghcr.io/schwankner/rockchip-rknn-libs:2.3.2-6.18.18-talos
-
-  files:
-    - path: /etc/cri/conf.d/20-customization.part
-      op: create
-      permissions: 0o644
-      content: |
-        [plugins."io.containerd.cri.v1.runtime"]
-          enable_cdi_devices = true
-          cdi_spec_dirs = ["/var/run/cdi"]
+      - image: ghcr.io/schwankner/rockchip-rknpu:0.9.10-6.18.22-talos
+      - image: ghcr.io/schwankner/rockchip-rknn-libs:2.3.2-6.18.22-talos
 
   sysctls:
     user.max_user_namespaces: "15000"
 ```
+
+> **Note:** No CDI containerd configuration is required. Talos 1.13 enables CDI in
+> containerd by default. The `rockchip-rknpu` extension ships the CDI spec at
+> `/etc/cdi/rockchip-npu.yaml`, which containerd discovers automatically on startup.
 
 Apply and let the node reboot:
 
@@ -423,7 +418,7 @@ and the 1.21× NPU lead becomes visible. A C-level benchmark or pipeline mode
 
 > **The key result is not the speedup ratio** — it is that the full stack works
 > end-to-end: `rknpu 0.9.10`, `librknnrt 2.3.2`, CDI device injection,
-> `procMount: Unmasked`, Talos v1.12.6 / kernel 6.18.18, **no `privileged: true`**.
+> `procMount: Unmasked`, Talos v1.13.0-rc.0 / kernel 6.18.22, **no `privileged: true`**.
 
 ### ResNet18 INT8 — 224×224, batch 1 (~1.8 GFLOPS)
 
