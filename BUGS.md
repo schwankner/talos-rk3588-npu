@@ -1807,6 +1807,49 @@ ResNet18 INT8.
 
 ---
 
+## Bug 51: Concurrent `rknn_init` from N threads crashes rknpu.ko (even with explicit core pinning)
+
+**Symptom:** Pod starts, binary executes, but the Kubernetes API server becomes
+unreachable within seconds (connection refused / timeout).  Node requires hard reboot
+via BMC.  No crash log is visible in pod output because the kernel panic occurs during
+the init phase before any inference starts.
+
+**Trigger:** `bench_c_mt` with N threads each calling `rknn_init` concurrently from
+`bench_thread()`.  The crash happens even when explicit core masks
+(`RKNN_NPU_CORE_0/1/2`) are used — concurrent `rknn_init` is the root cause, not
+`RKNN_NPU_CORE_AUTO`.
+
+**Root cause:** `rknn_init` is **not thread-safe** in librknnrt.so 2.3.2 / rknpu.ko
+driver 0.9.8.  When called simultaneously from N threads, internal driver state
+initialisation races, corrupting the NPU command queue and causing a kernel panic.
+
+**Solution:** Call `rknn_init` only from the **main thread**, one context at a time,
+with a short `usleep(20000)` between calls.  Pass the pre-initialised context to each
+thread via the argument struct.  Threads only run the inference loop:
+
+```c
+/* main() — sequential init */
+for (int t = 0; t < n_threads; t++) {
+    rknn_init(&args[t].ctx, model_data, model_size, 0, NULL);
+    rknn_set_core_mask(args[t].ctx, core_map[t % 3]);
+    /* ... query io, allocate buffers, warmup ... */
+    usleep(20000);  /* let driver settle between contexts */
+}
+/* spawn threads — they only call rknn_inputs_set/rknn_run/rknn_outputs_get */
+for (int t = 0; t < n_threads; t++)
+    pthread_create(&tids[t], NULL, bench_thread, &args[t]);
+```
+
+**Rule:** `rknn_init`, `rknn_destroy`, and `rknn_set_core_mask` must only be called
+from a single thread.  The inference APIs (`rknn_inputs_set`, `rknn_run`,
+`rknn_outputs_get`) are safe to call from different threads as long as each thread
+uses its own context.
+
+**Observed on:** rknpu.ko driver 0.9.8, librknnrt.so 2.3.2, Talos 1.13.0-rc.0 /
+kernel 6.18.22-talos, Turing RK1 (RK3588).
+
+---
+
 ## Bug 50: BuildKit layer-diff bug zero-truncates gcc output binaries in final image stage
 
 **Symptom:** `exec /bench_c: exec format error` / `exec /bench_c_mt: exec format error`

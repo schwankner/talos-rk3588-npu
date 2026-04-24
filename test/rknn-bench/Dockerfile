@@ -116,9 +116,10 @@ RUN curl -fsSL \
 # Stage 3: Final bench image (toolkit stripped, only compiled .rknn files kept)
 # ---------------------------------------------------------------------------
 FROM python:3.11-slim-bullseye
-# v16: Move C compilation into isolated c-compiler stage; COPY --from to avoid
-#      BuildKit layer-diff zero-truncation of gcc output binaries (Bug 50).
-LABEL "bench.build"="v16"
+# v17: Fix bench_c_mt crash: move all rknn_init calls from threads into main()
+#      (sequential).  rknn_init called concurrently from N threads crashes
+#      rknpu.ko even with explicit core pinning (Bug 51).
+LABEL "bench.build"="v17"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libgomp1 strace ca-certificates file curl \
