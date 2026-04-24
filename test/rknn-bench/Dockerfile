@@ -119,7 +119,10 @@ FROM python:3.11-slim-bullseye
 # v17: Fix bench_c_mt crash: move all rknn_init calls from threads into main()
 #      (sequential).  rknn_init called concurrently from N threads crashes
 #      rknpu.ko even with explicit core pinning (Bug 51).
-LABEL "bench.build"="v17"
+# v18: Diagnose Bug 52: CORE_1/CORE_2 inaccessible (non-IOMMU mode, missing DT
+#      iommus property).  Pin all bench_c_mt threads to CORE_0.  Add core-diag
+#      YAML + ConfigMap for per-core diagnostic.  Document in BUGS.md.
+LABEL "bench.build"="v18"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libgomp1 strace ca-certificates file curl \

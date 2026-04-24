@@ -18,7 +18,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: bench
-          image: ghcr.io/schwankner/rk3588-rknn-bench:v17
+          image: ghcr.io/schwankner/rk3588-rknn-bench:v18
           imagePullPolicy: Always
           # Override ENTRYPOINT to run the C binary directly.
           command: ["/bench_c", "/model/resnet18.rknn", "resnet18", "2000", "50"]

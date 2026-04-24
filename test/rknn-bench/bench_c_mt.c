@@ -3,19 +3,25 @@
  *
  * Each thread owns its own rknn_context.  Contexts are initialised
  * SEQUENTIALLY in main() (rknn_init is not safe to call from multiple
- * threads simultaneously — concurrent calls crash rknpu.ko).  Each
- * context is pinned to a specific NPU core (thread_id % 3 → CORE_0/1/2)
- * so no two threads compete for the same hardware queue.
+ * threads simultaneously — concurrent calls crash rknpu.ko).
  *
- * After sequential init + warmup, a pthread_barrier releases all threads
- * simultaneously so the NPU scheduler sees N parallel job streams.
- * The RK3588 has 3 NPU cores; 3 threads (one per core) gives close to
- * 3× single-thread aggregate throughput.
+ * HARDWARE LIMITATION (Bug 52): On Talos / kernel 6.18.22-talos with
+ * rknpu.ko 0.9.8 and the current device tree, only CORE_0 is accessible.
+ * The rknpu.ko driver starts in non-IOMMU mode ("rknpu iommu device-tree
+ * entry not found!") and CORE_1/CORE_2 never fire an interrupt — all
+ * submissions to those cores time out after 6 s.  Multi-core scaling
+ * requires adding the correct `iommus` DT properties to the npu@ nodes.
+ *
+ * Until that DT fix is in place, this binary runs ALL threads on CORE_0
+ * (RKNN_NPU_CORE_AUTO).  Multiple threads sharing a single core will
+ * serialize on the hardware queue; aggregate throughput will be close to
+ * single-thread throughput, not N× it.
  *
  * Design rules (hard-won):
  *   - rknn_init:          call only from main(), one at a time, NEVER from threads
- *   - RKNN_NPU_CORE_AUTO: forbidden for multi-context — deadlocks rknpu.ko driver
- *   - Explicit core masks: CORE_0/1/2 round-robin across threads
+ *   - RKNN_NPU_CORE_AUTO: forbidden for multi-context concurrent use (Bug 49)
+ *   - RKNN_NPU_CORE_1/2:  hardware timeout on this system (Bug 52, non-IOMMU mode)
+ *   - RKNN_NPU_CORE_0:    only working explicit core mask; safe for any thread count
  *
  * Usage:
  *   bench_c_mt <model.rknn> <model_name> <threads> <iters_per_thread> [warmup]
@@ -135,11 +141,14 @@ int main(int argc, char **argv)
     printf("  model=%s  size=%.1f MB\n",
            model_path, (double)model_size / (1024*1024));
 
-    /* Core map: distribute threads across the 3 RK3588 NPU cores.
-     * RKNN_NPU_CORE_AUTO must NOT be used here — concurrent contexts
-     * with AUTO deadlock the rknpu.ko driver command queue. */
+    /* Core map: Bug 52 — only CORE_0 accessible in non-IOMMU mode.
+     * CORE_1 and CORE_2 time out after 6 s (hardware IRQ never fires).
+     * All threads are pinned to CORE_0; they serialize on the same queue
+     * so aggregate throughput ≈ single-thread throughput.
+     * When the DT iommus property is fixed, change to:
+     *   { RKNN_NPU_CORE_0, RKNN_NPU_CORE_1, RKNN_NPU_CORE_2 } */
     static const rknn_core_mask core_map[3] = {
-        RKNN_NPU_CORE_0, RKNN_NPU_CORE_1, RKNN_NPU_CORE_2
+        RKNN_NPU_CORE_0, RKNN_NPU_CORE_0, RKNN_NPU_CORE_0
     };
 
     thread_arg_t *args = (thread_arg_t *)calloc(n_threads, sizeof(thread_arg_t));

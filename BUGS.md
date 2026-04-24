@@ -1807,6 +1807,80 @@ ResNet18 INT8.
 
 ---
 
+## Bug 52: NPU CORE_1 and CORE_2 inaccessible — rknpu.ko runs in non-IOMMU mode, sub-cores 1/2 never fire IRQ
+
+**Symptom:** Any inference with `RKNN_NPU_CORE_1`, `RKNN_NPU_CORE_2`, `RKNN_NPU_CORE_0_1`,
+or `RKNN_NPU_CORE_0_1_2` hangs for exactly **~6 400 ms** (the rknpu.ko hardware timeout)
+and prints `failed to submit!` in a loop.  `init_runtime` / `rknn_init` returns 0
+(success) for all core masks — the problem manifests only on the first `rknn_run`.
+`RKNN_NPU_CORE_AUTO` and `RKNN_NPU_CORE_0` work correctly at ~7 ms per inference.
+
+Kernel-side evidence (from `talosctl dmesg`):
+
+```
+kern:  info: platform fdab0000.npu: Adding to iommu group 7
+kern:  info: platform fdac0000.npu: Adding to iommu group 8
+kern:  info: platform fdad0000.npu: Adding to iommu group 9
+kern:  info: RKNPU fdab0000.rknpu: RKNPU: rknpu iommu device-tree entry not found!, using non-iommu mode
+kern:  info: RKNPU fdab0000.rknpu: RKNPU: Initialized RKNPU driver: v0.9.8 for 20240828
+```
+
+Only `fdab0000.rknpu` (CORE_0) is initialised.  `fdac0000` and `fdad0000` are added
+to IOMMU groups but never bind the rknpu driver.  On `rknn_run` to CORE_1:
+
+```
+kern:  err: RKNPU: core 1 irq status: 0x0, raw status: 0x0, require mask: 0x300,
+           task counter: 0x0, elapsed time: 6176579us
+kern:  err: RKNPU: job timeout, flags: 0x0
+kern:  info: RKNPU: soft reset, num: 1
+```
+
+`irq status: 0x0` and `raw status: 0x0` confirm CORE_1 hardware never acknowledges
+the submitted job.  The driver does a soft reset after each timeout and retries.
+
+**Root cause:** The `npu@fdab0000` Device Tree node lacks the `iommus` property.
+The rknpu.ko driver detects this ("iommu device-tree entry not found!") and falls
+back to **non-IOMMU mode**.  In non-IOMMU mode only the primary sub-core (CORE_0)
+is initialised.  CORE_1 and CORE_2 require IOMMU-mapped DMA descriptors to receive
+work; without IOMMU the hardware command descriptor for those sub-cores is never
+delivered and no interrupt fires.
+
+Three physical NPU instances exist in the DT (`fdab0000`, `fdac0000`, `fdad0000` —
+one per NPU sub-core) but only the first one has a complete rknpu binding.
+
+**Impact:**
+- Effective NPU capacity: **2 TOPS** (CORE_0 only), not the advertised 6 TOPS
+- Batch/pipeline multi-core acceleration not available
+- All benchmark results in this file are single-core (CORE_0 / AUTO) results
+- `bench_c_mt` (multi-thread, explicit core pinning) is therefore identical to
+  single-thread performance: CORE_0 at ~148 fps ResNet18 INT8
+
+**Diagnostic:**
+
+Python one-shot per core mask (from v17 bench image):
+
+| Core mask         | `init_runtime` | first inference | 10-iter avg       |
+|-------------------|---------------|-----------------|-------------------|
+| CORE_AUTO (0)     | ret=0         | 9.3 ms          | 7.0 ms / 143.8 fps |
+| CORE_0 (1)        | ret=0         | 7.7 ms          | 7.0 ms / 142.4 fps |
+| CORE_1 (2)        | ret=0         | **6301 ms** ⚠   | **6400 ms** / 0.2 fps |
+| CORE_2 (4)        | ret=0         | **6319 ms** ⚠   | **6400 ms** / 0.2 fps |
+| CORE_0_1 (3)      | ret=0         | **6339 ms** ⚠   | **6400 ms** / 0.2 fps |
+| CORE_0_1_2 (7)    | ret=0         | **6340 ms** ⚠   | **6400 ms** / 0.2 fps |
+
+**Solution (not yet implemented):** Add proper `iommus` DT property to the
+`npu@fdab0000` node (and potentially `npu@fdac0000`, `npu@fdad0000`) so that rknpu.ko
+enables IOMMU mode and can initialise all three sub-cores.  Requires sourcing the
+correct IOMMU controller cell values from the RK3588 DTS reference (Rockchip BSP).
+
+Until the DT is fixed, only CORE_AUTO and CORE_0 are usable.  Do not call
+`rknn_set_core_mask` with any mask other than 0 (AUTO) or 1 (CORE_0).
+
+**Observed on:** rknpu.ko driver 0.9.8, librknnrt.so 2.3.2, Talos 1.13.0-rc.0 /
+kernel 6.18.22-talos, Turing RK1 (RK3588).
+
+---
+
 ## Bug 51: Concurrent `rknn_init` from N threads crashes rknpu.ko (even with explicit core pinning)
 
 **Symptom:** Pod starts, binary executes, but the Kubernetes API server becomes
@@ -1928,7 +2002,7 @@ inference loop:
 
 ```c
 /* thread_id % 3 distributes threads across all 3 NPU cores */
-static const rknn_core_mask_t core_map[3] = {
+static const rknn_core_mask core_map[3] = {
     RKNN_NPU_CORE_0, RKNN_NPU_CORE_1, RKNN_NPU_CORE_2
 };
 rknn_set_core_mask(ctx, core_map[thread_id % 3]);

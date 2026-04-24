@@ -16,7 +16,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: bench
-          image: ghcr.io/schwankner/rk3588-rknn-bench:v17
+          image: ghcr.io/schwankner/rk3588-rknn-bench:v18
           imagePullPolicy: Always
           command: ["/bench_c_mt", "/model/yolov5s.rknn", "yolov5s", "3", "200", "20"]
           env:

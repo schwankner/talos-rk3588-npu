@@ -14,7 +14,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: bench
-          image: ghcr.io/schwankner/rk3588-rknn-bench:v17
+          image: ghcr.io/schwankner/rk3588-rknn-bench:v18
           imagePullPolicy: Always
           command: ["/bench_c_mt", "/model/resnet18.rknn", "resnet18", "1", "1000", "50"]
           env:
