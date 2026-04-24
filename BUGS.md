@@ -1346,4 +1346,341 @@ Applied as an update to the Bug 26 prepare-step patch in `rockchip-rknpu/pkg.yam
 
 ---
 
+## Bug 44: GET_HW_VERSION hangs AXI bus — mainline DT uses "nputop" not "npu0"
+
+**Symptom:** Node hard-hangs at the `RKNPU_ACTION GET_HW_VERSION` ioctl (action=0)
+immediately after rknpu probe, even with Bug 41 applied.  No kernel panic; requires BMC
+power-cycle.  The crash is the first MMIO access to `0xfdab0000`.
+
+**Root cause:** The mainline RK3588 device tree (used by Talos/sbc-rockchip) uses
+`power-domain-names = "nputop", "npu1", "npu2"` for the rknpu device.  The BSP driver
+calls `dev_pm_domain_attach_by_name(dev, "npu0")` for the first domain.  On mainline
+kernels `"npu0"` is not in the DT → `dev_pm_domain_attach_by_name()` returns NULL →
+`genpd_dev_npu0 = NULL` → no virtual genpd consumer is created for the `nputop` domain.
+
+With no consumer holding the `nputop` genpd domain active, `genpd_sync_power_off()` fires
+after probe and powers it off.  The NPU top domain controls the register file at
+`0xfdab0000`.  Any MMIO read there (e.g. `rknpu_get_hw_version()`) finds no AXI response
+→ bus lockup → watchdog reset.
+
+Bug 41's `pm_runtime_get_sync(virt_dev)` calls for `npu1`/`npu2` succeeded (those names
+are correct in mainline DT), but there was no `virt_dev` for `nputop` to call `get_sync`
+on, leaving the top domain unmanaged.
+
+**Verification:**
+```bash
+# On-node: power-domain-names in mainline DT
+talosctl read /proc/device-tree/rknpu@fdab0000/power-domain-names
+# Output: nputop.npu1.npu2  (NUL-separated)  ← "npu0" is absent
+
+# genpd:0 = nputop domain has no consumer, shows suspended
+cat /sys/devices/platform/fdab0000.rknpu/power/runtime_status   # active
+cat /sys/devices/genpd:0:fdab0000.rknpu/power/runtime_status    # (absent — NULL virt_dev)
+```
+
+**Fix:** When `dev_pm_domain_attach_by_name(dev, "npu0")` returns NULL, fall back to
+`dev_pm_domain_attach_by_name(dev, "nputop")`.  This ensures the NPU top-level power
+domain is always attached regardless of whether the kernel DT uses BSP (`"npu0"`) or
+mainline (`"nputop"`) naming.
+
+Applied as a Python source patch in `rockchip-rknpu/pkg.yaml` (Bug 44 patch, after Bug 41).
+
+---
+
+## Bug 43: genpd virtual devices show "suspended" after probe despite Bug 41 get_sync
+
+**Symptom:** Even with Bug 41's `pm_runtime_get_sync(virt_dev)` in place, sysfs shows:
+```
+/sys/devices/genpd:1:fdab0000.rknpu/power/runtime_status → suspended
+/sys/devices/genpd:2:fdab0000.rknpu/power/runtime_status → suspended
+```
+The NPU sub-domains powered by `npu1` and `npu2` genpd devices are powered off after
+probe, causing AXI lockups when the driver accesses sub-domain registers.
+
+**Root cause:** `pm_runtime_get_sync(virt_dev)` sets `usage_count = 1` and
+`runtime_status = RPM_ACTIVE`.  However, genpd performs an internal cleanup step after
+`dev_pm_domain_attach_by_name()` returns: it calls `pm_runtime_put()` (or equivalent)
+on the virtual device as part of its internal bookkeeping when finalising the consumer
+link.  This decrements `usage_count` from 1 to 0 and schedules a runtime suspend.
+When the suspend fires, `runtime_status` → `RPM_SUSPENDED` and the domain powers off.
+
+This is the same mechanism as Bug 33 for the main device: `pm_runtime_get_sync` alone
+leaves a window where genpd cleanup can undo the active reference.
+
+**Fix:** Add `pm_runtime_get_noresume(virt_dev)` immediately after each
+`pm_runtime_get_sync(virt_dev)`.  This bumps `usage_count` to 2 before any cleanup
+can run.  The genpd cleanup decrements from 2 to 1 (not 0), autosuspend is never
+scheduled, and `runtime_status` stays `RPM_ACTIVE` permanently.  Mirrors Bug 33 which
+does the same for the main NPU device.
+
+Applied as a Python source patch in `rockchip-rknpu/pkg.yaml` (Bug 43 patch, after Bug 44).
+
+---
+
+## Bug 45: fdab9000.iommu clock-gates itself, hanging NPU DMA in init_runtime()
+
+**Symptom:** Node hard-locks (AXI bus hang, no kernel panic, empty pstore) when
+`init_runtime()` is called.  Step-test confirms crash is exactly at that call:
+
+```
+1776958765.338 STEP 4: init_runtime(core_mask=NPU_CORE_AUTO) -- crash likely here
+(node reboots here, no further log)
+```
+
+Both CPU mode and NPU mode `init_runtime()` crash identically, placing the bug in
+the shared init path rather than the NPU core selection path.
+
+**Root cause:** The `rockchip-iommu` driver for `fdab9000.iommu` (the NPU IOMMU)
+manages itself via `pm_runtime`.  When no driver holds a PM reference, the IOMMU
+driver's runtime suspend callback fires: it disables the IOMMU clocks via the clock
+framework (no SCMI; the IOMMU clocks are local gating clocks).  In non-iommu mode,
+`rknpu` never calls `iommu_attach_device()` or any IOMMU framework API, so the IOMMU
+usage count stays at 0 and the IOMMU enters `RPM_SUSPENDED` immediately after its own
+probe.  Confirmed via genpd summary:
+
+```
+nputop   on   0
+    fdab9000.iommu   suspended   0   SW    <- 0 consumers, clocks gated
+    genpd:0:fdab0000.rknpu   active   0   SW
+```
+
+The IOMMU hardware (`fdab9000`) sits physically between the NPU DMA engine and the
+memory interconnect.  When `init_runtime()` triggers the first `RKNPU_SUBMIT` ioctl
+(submitting the model init job), the NPU DMA engine tries to fetch the task descriptor
+from DRAM.  With the IOMMU hardware clock-gated, the DMA transaction cannot complete:
+the AXI bus hangs waiting for an acknowledgement that never arrives -- CPU hard lockup.
+
+The power domain (`nputop`) is ON; the bug is purely about the IOMMU clock being off,
+not about the power domain being off.
+
+**Fix:** During `rknpu_probe`, look up the IOMMU platform device via the DT `"iommus"`
+phandle and call `pm_runtime_get_noresume()` on it.  This permanently prevents the
+IOMMU from entering runtime suspend, keeping its clocks enabled for the lifetime of
+the rknpu driver.
+
+```c
+/* Bug 45 */
+struct device_node *_iommu_dn = of_parse_phandle(dev->of_node, "iommus", 0);
+if (_iommu_dn) {
+    struct platform_device *_iommu_pd = of_find_device_by_node(_iommu_dn);
+    if (_iommu_pd)
+        pm_runtime_get_noresume(&_iommu_pd->dev);
+    of_node_put(_iommu_dn);
+}
+```
+
+Applied as a Python source patch in `rockchip-rknpu/pkg.yaml` (Bug 45 + Bug 45v2
+patches, last in the prepare sequence, after Bug 40).
+
+**Bug 45v2 follow-up:** The initial Bug 45 patch used `pm_runtime_get_noresume()`
+which only increments usage_count but does NOT wake a device already in
+`RPM_SUSPENDED` state.  Since the IOMMU is already suspended by the time rknpu_probe
+runs, clocks remained off.  Fix: use `pm_runtime_get_sync()` (actively resumes the
+device, re-enabling clocks even if already suspended) followed by
+`pm_runtime_get_noresume()` (permanent anchor).  Mirrors the Bug 32/33 pattern.
+
+---
+
+## Bug 46: init_runtime() hard lockup — fdab9000.iommu (Rockchip MMU) suspended in DMA path
+
+**Symptom:** `init_runtime()` causes an immediate hard CPU lockup (AXI bus hang, watchdog
+reset, ~6 min recovery).  Steps 0–3 of the RKNN step test pass; Step 4 (`init_runtime`)
+locks the machine.  No kernel oops, no pstore, no recovery — only BMC power cycle.
+
+Confirmed by two separate boots: the crash survived adding `iommu.passthrough=1` (which
+fixed the ARM SMMUv3 layer) because the Rockchip IOMMU hardware was still suspended.
+
+**Root cause (confirmed by sysfs):**
+
+RK3588 has two IOMMU layers in the NPU DMA path:
+
+1. **Rockchip IOMMU** (`fdab9000.iommu`, phandle `0x66`) — hardware MMU physically
+   embedded in the AXI path between the NPU DMA engine and the system bus.
+   `npu@fdab0000` DT node has `iommus = <0x66>`.
+
+2. **ARM SMMUv3** (`fc900000.iommu`, phandle `0x80`) — system-level IOMMU.
+   Adds `fdab0000.npu` to IOMMU group 7 (type = `DMA`).
+
+The `rknpu@fdab0000` DT node has **no** `iommus` property (only `npu@fdab0000` has it).
+rknpu therefore uses non-iommu mode (physical addresses, no IOMMU configuration).
+
+`fdab9000.iommu` was confirmed **suspended** (`runtime_status = suspended`) — its clocks
+are gated.  The Rockchip MMU hardware sits physically between the NPU DMA engine and the
+rest of the AXI bus.  With clocks off, it cannot route any DMA transaction; the NPU DMA
+engine stalls waiting for an acknowledgement that never arrives → AXI bus lockup.
+
+`iommu.passthrough=1` fixed the ARM SMMUv3 layer (group 7 type changed to `identity`)
+but the crash persisted because `fdab9000.iommu` was still suspended, blocking DMA
+before it even reached the SMMUv3.
+
+```bash
+# Confirmed fdab9000.iommu suspended
+talosctl read /sys/bus/platform/devices/fdab9000.iommu/power/runtime_status
+# → suspended
+
+# Confirmed iommus phandle on npu@fdab0000 = 0x66 = fdab9000.iommu
+talosctl read /proc/device-tree/npu@fdab0000/iommus | xxd  # → 00000066
+# ARM SMMUv3 phandle = 0x80 (different node)
+talosctl read /proc/device-tree/iommu@fc900000/phandle | xxd  # → 00000080
+```
+
+**Why Bug 45 / Bug 45v2 were ineffective:**
+
+Both patches used `of_parse_phandle(dev->of_node, "iommus", 0)` on `rknpu@fdab0000` to
+find the Rockchip IOMMU.  But `rknpu@fdab0000` has **no** `iommus` DT property.
+`of_parse_phandle()` returned NULL every time — `dev_warn("Bug 45: no iommus phandle in
+DT")` fired on every boot and the `pm_runtime_get_sync()` call in Bug 45v2 never ran.
+
+**Fix (two components, both required):**
+
+1. **`iommu.passthrough=1` kernel cmdline** (applied via `talosctl patch machineconfig`
+   + `talosctl upgrade --preserve`): sets ARM SMMUv3 group 7 to identity/passthrough so
+   physical addresses from rknpu's `dma_direct` allocations are not rejected by the SMMU.
+
+2. **Bug 46 driver patch** (in `rockchip-rknpu/pkg.yaml`): replaces the Bug 45 else-branch
+   `dev_warn` with code that finds `fdab9000.iommu` by platform-bus device name
+   (`bus_find_device_by_name()`) and calls `pm_runtime_get_sync()` +
+   `pm_runtime_get_noresume()` to keep it permanently active:
+
+```c
+/* Bug 46 */
+struct device *_rk_mmu =
+    bus_find_device_by_name(&platform_bus_type, NULL, "fdab9000.iommu");
+if (_rk_mmu) {
+    pm_runtime_get_sync(_rk_mmu);
+    pm_runtime_get_noresume(_rk_mmu);
+    dev_info(dev, "Bug 46: fdab9000.iommu held active\n");
+    put_device(_rk_mmu);
+}
+```
+
+With both fixes: physical addresses pass through fdab9000 (clocks on, bypass mode) and
+then through ARM SMMUv3 (passthrough domain) to reach DRAM.  DMA succeeds.
+
+**Long-term fix (TODO):** Add `iommus = <&rknpu_mmu>` to `rknpu@fdab0000` DT node via a
+Talos DT overlay.  This enables rknpu iommu-mode: the driver configures fdab9000 page
+tables, eliminating non-iommu mode entirely.  `iommu.passthrough=1` can then be removed.
+
+---
+
+## Bug 47: init_runtime() fails with errno 38 — RKNPU_MEM_CREATE returns -ENOSYS
+
+**Symptom:** After Bug 46 eliminates the hard lockup, `init_runtime()` fails softly with
+errno 38 (ENOSYS). Node stays up (no lockup). Step 4 of the RKNN step test returns
+non-zero. RKNN library log:
+
+```
+E RKNN: [07:40:51.484] failed to allocate fd, ret: -1, errno: 38, errstr: Function not implemented
+E RKNN: [07:40:51.484] failed to malloc npu memory, size: 6120, flags: 0xa
+```
+
+**Root cause (two-layer failure):**
+
+The rknpu driver (w568w/rknpu-module) allocates internal NPU command buffers through an
+`rk_dma_heap` handle stored in `rknpu_dev->heap`.  The initialization chain:
+
+1. `rknpu_drv.c` calls `rk_dma_heap_find("rk-dma-heap-cma")` → returns `NULL` on
+   mainline 6.18 (no Rockchip BSP CMA heap registered).
+
+2. **Bug 36** added a fallback: `rk_dma_heap_find("system")` → also returns `NULL`.
+   `rk_dma_heap_find` is rknpu's **internal** heap registry, not the standard kernel
+   `dma_heap_find`.  The standard system heap is not registered in rknpu's registry.
+
+3. With `rknpu_dev->heap == NULL`, the original `rknpu_mem.c` stub returned `-ENOSYS`
+   for all memory ioctls.  The comment said librknnrt.so v2.3.x never calls
+   `RKNPU_MEM_CREATE` — this was incorrect.  The library calls it during `init_runtime()`
+   to allocate small internal NPU command buffers (~6 KB).
+
+**Fix: Bug 47 — implement rknpu_mem_create_ioctl with standard DMA APIs**
+
+Replaced the -ENOSYS stub in `rockchip-rknpu/files/rknpu_mem.c` with a real
+implementation using `dma_alloc_coherent` + `anon_inode_getfd`:
+
+- `dma_alloc_coherent(rknpu_dev->dev, ...)`: allocates physically contiguous,
+  cache-coherent memory.  In `iommu.passthrough=1` mode, `dma_addr == phys_addr`,
+  which is what the NPU hardware uses for DMA submissions in non-IOMMU mode.
+
+- `anon_inode_getfd("[rknpu_mem]", &rknpu_mem_obj_fops, ...)`: returns a userspace fd.
+  The file's `.mmap` callback uses `dma_mmap_coherent` so the runtime can mmap the
+  buffer for CPU access.  The `.release` callback calls `dma_free_coherent`, tying
+  memory lifetime to fd lifetime (matches BSP `rk_dma_heap_bufferfd_alloc` semantics).
+
+`RKNPU_MEM_DESTROY` and `RKNPU_MEM_SYNC` remain no-ops: memory is freed by closing
+the fd; DMA-coherent memory needs no explicit cache maintenance on ARM64.
+
+**Key struct layout (`struct rknpu_mem_create` from rknpu_mem.h):**
+```c
+__u32 handle;          /* output: fd */
+__u32 flags;           /* input:  allocation flags (0xa = non-IOMMU+CMA) */
+__u64 size;            /* input:  allocation size in bytes */
+__u64 obj_addr;        /* output: pointer to struct rknpu_mem_object (kernel VA) */
+__u64 dma_addr;        /* output: device DMA address (= physical in passthrough mode) */
+__u64 sram_size;
+__s32 iommu_domain_id;
+__u32 core_mask;
+```
+
+**Bug 47 rev 2: NPU job silently times out (3 × 60 s = 180 s), IRQ count stays 0**
+
+After rev 1, `init_runtime()` succeeded (errno 0), but `rknn.inference()` hung for
+~3 minutes then returned an error. `dmesg` showed 3 retries; IRQ 92/93/94 (shared
+between `fdab9000.iommu` and `fdab0000.rknpu`) never fired.
+
+**Root cause:** `rknpu_job.c:rknpu_job_subcore_commit_pc()` casts `task_obj_addr` as
+`(struct rknpu_mem_object *)(uintptr_t)task_obj_addr` and reads `->kv_addr` to find
+the NPU command/task array.  Rev 1 returned `obj_addr = (u64)cpu_addr` — the raw
+kernel virtual address of the DMA buffer itself.  With that raw address treated as a
+`struct rknpu_mem_object *`, the submit path read the first bytes of the NPU command
+data as struct fields, extracted a garbage `kv_addr`, and programmed the NPU hardware
+with an invalid DMA address.  The NPU never completed; the wait loop timed out.
+
+**Fix (rev 2):** Wrap `rknpu_mem_object` in a `struct rknpu_mem_buf` tracker:
+
+```c
+struct rknpu_mem_buf {
+    struct rknpu_mem_object mem;  /* MUST be first — cast target in submit */
+    struct device *dev;
+};
+```
+
+Populate `buf->mem.kv_addr` and `buf->mem.dma_addr` from `dma_alloc_coherent`,
+then return `args.obj_addr = (u64)(uintptr_t)&buf->mem`.  The submit path now
+dereferences a valid, correctly-populated `struct rknpu_mem_object`.
+
+**Verification (bench-step-v21 on Turing RK1, kernel 6.18.18-talos):**
+```
+STEP 4: init_runtime(core_mask=NPU_CORE_AUTO) -- done ret=0
+STEP 5: warmup inference done
+STEP 6: done fps=159.2 latency_ms=6.28
+STEP 7: ALL STEPS COMPLETED SUCCESSFULLY
+```
+
+**Final benchmark results — ResNet18 224×224, batch 1, Turing RK1 (RK3588):**
+
+| Mode | Throughput | Latency | Speedup |
+|------|-----------|---------|---------|
+| NPU (RKNPU v2, 3-core RK3588) | 146.8 fps | 6.81 ms | 1.0× (baseline) |
+| CPU (ARM Cortex-A76 NEON fallback) | 152.7 fps | 6.55 ms | 0.96× |
+
+ResNet18 is small enough (~1.8 GFLOPS) that the A76 NEON path matches NPU
+throughput at batch-1.  Larger models show the expected NPU speedup.
+
+**Final benchmark results — ResNet50 224×224, fp16, batch 1, Turing RK1 (RK3588):**
+
+Model compiled with rknn-toolkit2 2.3.2 (matching librknnrt 2.3.2), no quantization
+(do_quantization=False → fp16).  200 NPU iterations / 30 CPU iterations, 10 warmup.
+
+| Mode | Throughput | Latency | Speedup |
+|------|-----------|---------|---------|
+| NPU (RK3588, NPU_CORE_AUTO) | 29.3 fps | 34.16 ms | 1.19× |
+| CPU (ARM Cortex-A76 NEON fallback) | 24.7 fps | 40.44 ms | 1.0× (baseline) |
+
+At fp16 without INT8 quantization the NPU advantage over the highly-optimised A76
+NEON path is modest (1.2×) for a batch-1 workload.  INT8 quantization is expected
+to yield the 5–30× speedup typical for production RKNN deployments.  The result
+confirms the NPU path is fully functional end-to-end (rknpu 0.9.8 driver,
+librknnrt 2.3.2, CDI device injection, Talos 6.18.18).
+
+---
+
 *Add new bugs above this line, most recent first.*
