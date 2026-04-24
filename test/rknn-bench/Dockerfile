@@ -7,7 +7,7 @@
 #
 # Build (ARM64 native or via buildx):
 #   docker buildx build --platform linux/arm64 \
-#     -t ghcr.io/schwankner/rk3588-rknn-bench:v23 --push .
+#     -t ghcr.io/schwankner/rk3588-rknn-bench:v12 --push .
 #
 # Base image selection history:
 #   python:3.11-slim (Trixie/glibc 2.40+): BTI/PAC exec format errors on RK3588
@@ -19,7 +19,7 @@
 #     base layers (no BuildKit diff/truncation), glibc 2.31 works on this kernel.
 
 # ---------------------------------------------------------------------------
-# Stage 1: Compile ResNet50 ONNX → RK3588 RKNN (toolkit 2.3.2, ARM64)
+# Stage 1: Compile models ONNX → RK3588 RKNN (toolkit 2.3.2, ARM64)
 #
 # rknn-toolkit2 (compilation toolkit) is separate from rknn-toolkit-lite2
 # (inference runtime).  The full toolkit runs entirely offline; it takes an
@@ -52,22 +52,35 @@ RUN curl -fsSL \
  && pip install --no-cache-dir --no-deps /tmp/${RKNN2_WHL} \
  && rm /tmp/${RKNN2_WHL}
 
-# Download ResNet50-v2 ONNX (~97 MB) from the ONNX model zoo (git-lfs CDN)
+# Download ONNX models
+# ResNet18-v2-7 (~46 MB) — ImageNet classification, ~1.8 GFLOPS
+RUN curl -fsSL \
+    "https://media.githubusercontent.com/media/onnx/models/main/validated/vision/classification/resnet/model/resnet18-v2-7.onnx" \
+    -o /tmp/resnet18.onnx
+
+# ResNet50-v2-7 (~97 MB) — ImageNet classification, ~8.2 GFLOPS
 RUN curl -fsSL \
     "https://media.githubusercontent.com/media/onnx/models/main/validated/vision/classification/resnet/model/resnet50-v2-7.onnx" \
     -o /tmp/resnet50.onnx
+
+# YOLOv5s ReLU variant (~27 MB) — COCO object detection, ~16 GFLOPS
+# ReLU activation instead of SiLU for full NPU mapping (no CPU fallback ops).
+# Source: airockchip/rknn_model_zoo CDN (standard RKNN benchmark model)
+RUN curl -fsSL \
+    "https://ftrg.zbox.filez.com/v2/delivery/data/95f00b0fc900458ba134f8b180b3f7a1/examples/yolov5/yolov5s_relu.onnx" \
+    -o /tmp/yolov5s.onnx
 
 RUN mkdir -p /model
 COPY compile_models.py /tmp/compile_models.py
 RUN python3 /tmp/compile_models.py
 
 # ---------------------------------------------------------------------------
-# Stage 2: Final bench image (toolkit stripped, only the compiled .rknn kept)
+# Stage 2: Final bench image (toolkit stripped, only compiled .rknn files kept)
 # ---------------------------------------------------------------------------
 FROM python:3.11-slim-bullseye
-# v23: ResNet50 compiled with rknn-toolkit2 2.3.2 (same version as librknnrt.so)
-#      for a fair NPU vs CPU comparison. YOLOv5s kept for reference.
-LABEL "bench.build"="v23"
+# v12: ResNet18 INT8 + YOLOv5s INT8 compiled with rknn-toolkit2 2.3.2.
+#      INT8 quantization shows the full NPU speedup potential (~10× for ResNet18).
+LABEL "bench.build"="v12"
 
 # gcc + libc6-dev are only needed to build the LD_PRELOAD shim; purged afterward.
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -95,18 +108,16 @@ RUN pip install --no-cache-dir \
     numpy Pillow \
     && rm /tmp/rknn_toolkit_lite2-2.3.2-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
 
-# Models
-# resnet18: pre-converted, ~1.8 GFLOPS (light; reference)
-# resnet50: compiled in stage 1 with toolkit 2.3.2, ~8 GFLOPS fp16 (clear NPU speedup)
-# yolov5s:  pre-compiled with toolkit 1.6.2, ~16 GFLOPS (reference; limited speedup due to version mismatch)
-COPY resnet18.rknn /model/resnet18.rknn
-COPY --from=model-compiler /model/resnet50_for_rk3588.rknn /model/resnet50.rknn
-RUN curl -fsSL \
-    "https://raw.githubusercontent.com/airockchip/rknn-toolkit2/master/rknpu2/examples/rknn_yolov5_demo/model/RK3588/yolov5s-640-640.rknn" \
-    -o /model/yolov5s.rknn
+# Models — all compiled with rknn-toolkit2 2.3.2 in stage 1
+#   resnet18: INT8,  224×224, ~1.8 GFLOPS  → expected ~10× NPU speedup
+#   resnet50: fp16,  224×224, ~8.2 GFLOPS  → baseline FP16 comparison (~1.2×)
+#   yolov5s:  INT8,  640×640, ~16 GFLOPS   → expected ~5-10× NPU speedup
+COPY --from=model-compiler /model/resnet18_int8_for_rk3588.rknn /model/resnet18.rknn
+COPY --from=model-compiler /model/resnet50_for_rk3588.rknn      /model/resnet50.rknn
+COPY --from=model-compiler /model/yolov5s_int8_for_rk3588.rknn  /model/yolov5s.rknn
 
 COPY bench.py /bench.py
 COPY bench_v9.py /bench_v9.py
 
 ENTRYPOINT ["python3", "/bench.py"]
-CMD ["--mode", "npu", "--model", "resnet50", "--iterations", "200"]
+CMD ["--mode", "npu", "--model", "resnet18", "--iterations", "200"]

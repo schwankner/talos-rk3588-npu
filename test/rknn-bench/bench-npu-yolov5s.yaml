@@ -1,12 +1,13 @@
 ---
-# RKNN CPU baseline benchmark Job — ResNet18 INT8
-# Runs the same INT8 model on ARM CPU cores (no NPU) for comparison.
-# librknnrt.so still requires /dev/rknpu to init — CDI injects it via
-# rockchip.com/npu: "1"; --mode cpu calls init_runtime() without core_mask.
+# RKNN NPU benchmark Job — YOLOv5s INT8
+# Model: YOLOv5s ReLU variant, 640×640, INT8 quantized, ~16 GFLOPS
+# ReLU activation maps all ops to NPU (no SiLU CPU fallback ops).
+# Compiled with rknn-toolkit2 2.3.2 (= librknnrt.so version).
+# Expected: ~50+ fps on NPU vs ~5 fps on CPU → ~10× speedup.
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: rknn-bench-cpu
+  name: rknn-bench-npu-yolov5s
   namespace: default
 spec:
   backoffLimit: 0
@@ -17,7 +18,7 @@ spec:
         - name: bench
           image: ghcr.io/schwankner/rk3588-rknn-bench:v12
           imagePullPolicy: Always
-          args: ["--mode", "cpu", "--model", "resnet18", "--iterations", "30"]
+          args: ["--mode", "npu", "--model", "yolov5s", "--iterations", "100"]
           env:
             - name: PYTHONUNBUFFERED
               value: "1"
@@ -28,9 +29,8 @@ spec:
           resources:
             limits:
               rockchip.com/npu: "1"
-              cpu: "4"
+              cpu: "2"
               memory: 512Mi
             requests:
-              rockchip.com/npu: "1"
-              cpu: "2"
+              cpu: "1"
               memory: 256Mi

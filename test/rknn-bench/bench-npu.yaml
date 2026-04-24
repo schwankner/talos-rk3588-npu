@@ -1,8 +1,8 @@
 ---
-# RKNN NPU benchmark Job
-# Runs ResNet50 (224x224, ~8 GFLOPS fp16) on the RK3588 NPU.
-# Model compiled with rknn-toolkit2 2.3.2 — same version as librknnrt.so.
-# Expected: 30-100 fps on NPU vs 1-5 fps on CPU → 10-50x speedup.
+# RKNN NPU benchmark Job — ResNet18 INT8
+# Model: ResNet18-v2, 224×224, INT8 quantized, ~1.8 GFLOPS
+# Compiled with rknn-toolkit2 2.3.2 (= librknnrt.so version).
+# Expected: ~200+ fps on NPU vs ~20 fps on CPU → ~10× speedup.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -15,9 +15,9 @@ spec:
       restartPolicy: Never
       containers:
         - name: bench
-          image: ghcr.io/schwankner/rk3588-rknn-bench:v11
+          image: ghcr.io/schwankner/rk3588-rknn-bench:v12
           imagePullPolicy: Always
-          args: ["--mode", "npu", "--model", "resnet50", "--iterations", "200"]
+          args: ["--mode", "npu", "--model", "resnet18", "--iterations", "200"]
           env:
             - name: PYTHONUNBUFFERED
               value: "1"

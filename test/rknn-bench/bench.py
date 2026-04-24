@@ -2,14 +2,17 @@
 """
 RKNN NPU vs CPU benchmark for RK3588.
 
-Supports multiple models to demonstrate NPU speedup at different compute levels:
+Models (all compiled with rknn-toolkit2 2.3.2):
 
-  resnet18  - 224x224, ~1.8 GFLOPS  (light; NPU ~= CPU at batch-1)
-  yolov5s   - 640x640, ~16 GFLOPS   (heavy; NPU clearly faster)
+  resnet18  - 224×224, INT8,  ~1.8 GFLOPS  → ~10× NPU speedup
+  resnet50  - 224×224, fp16,  ~8.2 GFLOPS  → ~1.2× (FP16 baseline)
+  yolov5s   - 640×640, INT8,  ~16 GFLOPS   → ~5-10× NPU speedup
 
 Usage:
-  bench.py --mode npu --model yolov5s --iterations 200
-  bench.py --mode cpu --model yolov5s --iterations 50
+  bench.py --mode npu --model resnet18  --iterations 200
+  bench.py --mode cpu --model resnet18  --iterations 30
+  bench.py --mode npu --model yolov5s   --iterations 100
+  bench.py --mode cpu --model yolov5s   --iterations 20
 """
 
 import argparse
@@ -48,26 +51,35 @@ except ImportError as e:
 # dtype:       numpy dtype for the input tensor
 MODEL_CONFIGS = {
     'resnet18': {
+        # INT8, compiled with rknn-toolkit2 2.3.2 — the standard RK3588 NPU benchmark.
+        # Mean/std baked in (ImageNet normalisation) — feed raw uint8 directly.
+        # Expected: ~200+ fps NPU vs ~20 fps CPU → ~10× speedup.
         'path':        '/model/resnet18.rknn',
         'input_shape': (1, 3, 224, 224),
         'dtype':       np.uint8,
         'gflops':      1.8,
+        'quant':       'INT8',
     },
     'resnet50': {
-        # Compiled with rknn-toolkit2 2.3.2 (same version as librknnrt.so),
-        # float16, mean/std baked in — feed raw uint8 input directly.
+        # fp16, compiled with rknn-toolkit2 2.3.2 — FP16 baseline comparison.
+        # Mean/std baked in — feed raw uint8 directly.
+        # Expected: ~30 fps NPU vs ~25 fps CPU → ~1.2× (FP16 undersells NPU).
         'path':        '/model/resnet50.rknn',
         'input_shape': (1, 3, 224, 224),
         'dtype':       np.uint8,
         'gflops':      8.2,
+        'quant':       'fp16',
     },
     'yolov5s': {
-        # Compiled with rknn-toolkit2 1.6.2; limited NPU speedup due to
-        # version mismatch with runtime 2.3.2 (many CPU fallback ops).
+        # INT8, ReLU variant, compiled with rknn-toolkit2 2.3.2.
+        # All ops mapped to NPU (ReLU avoids SiLU CPU fallback).
+        # Mean/std: [0,0,0]/[255,255,255] — normalises uint8 → [0,1].
+        # Expected: ~50+ fps NPU vs ~5 fps CPU → ~10× speedup.
         'path':        '/model/yolov5s.rknn',
         'input_shape': (1, 3, 640, 640),
         'dtype':       np.uint8,
         'gflops':      16.0,
+        'quant':       'INT8',
     },
 }
 
@@ -85,7 +97,8 @@ def run_bench(mode: str, model_name: str, iterations: int) -> None:
     cfg = MODEL_CONFIGS[model_name]
 
     print(f"=== RKNN Benchmark  mode={mode}  model={model_name}"
-          f"  gflops={cfg['gflops']}  iterations={iterations} ===", flush=True)
+          f"  quant={cfg['quant']}  gflops={cfg['gflops']}"
+          f"  iterations={iterations} ===", flush=True)
 
     rknpu_dev = "/dev/rknpu"
     rknpu_ok  = os.path.exists(rknpu_dev)
@@ -156,8 +169,9 @@ def run_bench(mode: str, model_name: str, iterations: int) -> None:
     print(f"  Throughput  : {fps:.1f} fps")
     print(f"  Latency     : {ms_per:.2f} ms / inference")
     print()
-    print(f"RESULT mode={mode} model={model_name} runtime={runtime_label!r} "
-          f"fps={fps:.1f} latency_ms={ms_per:.2f}")
+    print(f"RESULT mode={mode} model={model_name} quant={cfg['quant']}"
+          f" runtime={runtime_label!r}"
+          f" fps={fps:.1f} latency_ms={ms_per:.2f}")
 
 
 if __name__ == "__main__":

@@ -1,12 +1,12 @@
 ---
-# RKNN CPU baseline benchmark Job — ResNet18 INT8
+# RKNN CPU baseline benchmark Job — YOLOv5s INT8
 # Runs the same INT8 model on ARM CPU cores (no NPU) for comparison.
 # librknnrt.so still requires /dev/rknpu to init — CDI injects it via
 # rockchip.com/npu: "1"; --mode cpu calls init_runtime() without core_mask.
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: rknn-bench-cpu
+  name: rknn-bench-cpu-yolov5s
   namespace: default
 spec:
   backoffLimit: 0
@@ -17,7 +17,7 @@ spec:
         - name: bench
           image: ghcr.io/schwankner/rk3588-rknn-bench:v12
           imagePullPolicy: Always
-          args: ["--mode", "cpu", "--model", "resnet18", "--iterations", "30"]
+          args: ["--mode", "cpu", "--model", "yolov5s", "--iterations", "20"]
           env:
             - name: PYTHONUNBUFFERED
               value: "1"
