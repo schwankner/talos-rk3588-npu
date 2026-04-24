@@ -28,7 +28,7 @@ rknn.config(
 
 # ResNet50-v2-7.onnx has a dynamic batch dimension ('N', 3, 224, 224).
 # RKNN requires static shapes; fix batch=1 via input_size_list.
-ret = rknn.load_onnx(model=ONNX_PATH, input_size_list=[[1, 3, 224, 224]])
+ret = rknn.load_onnx(model=ONNX_PATH, inputs=['data'], input_size_list=[[1, 3, 224, 224]])
 if ret != 0:
     sys.exit(f"load_onnx failed: {ret}")
 print("  load_onnx OK")
