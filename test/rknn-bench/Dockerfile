@@ -33,6 +33,7 @@ FROM python:3.11-slim-bullseye AS model-compiler
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl ca-certificates libgomp1 libglib2.0-0 \
+        cmake build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 # Install rknn-toolkit2 2.3.2 ARM64 wheel (no torch dependency needed for ONNX)
