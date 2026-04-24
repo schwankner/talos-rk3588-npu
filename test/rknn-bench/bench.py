@@ -153,6 +153,13 @@ def run_bench(mode: str, model_name: str, iterations: int) -> None:
     for _ in range(10):
         rknn.inference(inputs=[inp])
 
+    # Hardware profiling — reports actual NPU compute time broken down by layer,
+    # unaffected by Python API overhead.  NPU mode only; CPU fallback has no profiler.
+    if mode == "npu":
+        print(f"  --- NPU hardware performance profile ---", flush=True)
+        rknn.eval_perf(is_print=True)
+        print(f"  --- end profile ---", flush=True)
+
     print(f"  Running {iterations} inferences...", flush=True)
     t0 = time.perf_counter()
     for _ in range(iterations):
