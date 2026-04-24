@@ -1,15 +1,8 @@
 ---
 # RKNN CPU baseline benchmark Job
-# Runs YOLOv5s (640x640, ~16 GFLOPS) on ARM CPU cores (no NPU cores).
-#
-# librknnrt.so requires /dev/rknpu and /dev/dma_heap/system to initialise
-# even in CPU fallback mode.  We request rockchip.com/npu: "1" so CDI
-# injects the devices; --mode cpu calls init_runtime() without a core_mask
-# so inference runs on ARM Cortex-A76 NEON rather than NPU cores.
-#
-# SoC detection: handled by dt_compat_shim.so LD_PRELOAD baked into the image.
-#
-# Expected result: ~1-5 fps (200-1000 ms/inference) — 10-50x slower than NPU
+# Runs ResNet50 (224x224, ~8 GFLOPS fp16) on ARM CPU cores (no NPU).
+# librknnrt.so still requires /dev/rknpu to init — CDI injects it via
+# rockchip.com/npu: "1"; --mode cpu calls init_runtime() without core_mask.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -22,9 +15,9 @@ spec:
       restartPolicy: Never
       containers:
         - name: bench
-          image: ghcr.io/schwankner/rk3588-rknn-bench:v22
+          image: ghcr.io/schwankner/rk3588-rknn-bench:v23
           imagePullPolicy: Always
-          args: ["--mode", "cpu", "--model", "yolov5s", "--iterations", "20"]
+          args: ["--mode", "cpu", "--model", "resnet50", "--iterations", "30"]
           env:
             - name: PYTHONUNBUFFERED
               value: "1"

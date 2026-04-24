@@ -53,7 +53,17 @@ MODEL_CONFIGS = {
         'dtype':       np.uint8,
         'gflops':      1.8,
     },
+    'resnet50': {
+        # Compiled with rknn-toolkit2 2.3.2 (same version as librknnrt.so),
+        # float16, mean/std baked in — feed raw uint8 input directly.
+        'path':        '/model/resnet50.rknn',
+        'input_shape': (1, 3, 224, 224),
+        'dtype':       np.uint8,
+        'gflops':      8.2,
+    },
     'yolov5s': {
+        # Compiled with rknn-toolkit2 1.6.2; limited NPU speedup due to
+        # version mismatch with runtime 2.3.2 (many CPU fallback ops).
         'path':        '/model/yolov5s.rknn',
         'input_shape': (1, 3, 640, 640),
         'dtype':       np.uint8,
