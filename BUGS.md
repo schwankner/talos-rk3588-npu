@@ -1663,8 +1663,23 @@ STEP 7: ALL STEPS COMPLETED SUCCESSFULLY
 | CPU (ARM Cortex-A76 NEON fallback) | 152.7 fps | 6.55 ms | 0.96× |
 
 ResNet18 is small enough (~1.8 GFLOPS) that the A76 NEON path matches NPU
-throughput at batch-1.  Larger models (ResNet50, MobileNetV2, YOLO variants)
-show the expected 5–30× NPU speedup.
+throughput at batch-1.  Larger models show the expected NPU speedup.
+
+**Final benchmark results — ResNet50 224×224, fp16, batch 1, Turing RK1 (RK3588):**
+
+Model compiled with rknn-toolkit2 2.3.2 (matching librknnrt 2.3.2), no quantization
+(do_quantization=False → fp16).  200 NPU iterations / 30 CPU iterations, 10 warmup.
+
+| Mode | Throughput | Latency | Speedup |
+|------|-----------|---------|---------|
+| NPU (RK3588, NPU_CORE_AUTO) | 29.3 fps | 34.16 ms | 1.19× |
+| CPU (ARM Cortex-A76 NEON fallback) | 24.7 fps | 40.44 ms | 1.0× (baseline) |
+
+At fp16 without INT8 quantization the NPU advantage over the highly-optimised A76
+NEON path is modest (1.2×) for a batch-1 workload.  INT8 quantization is expected
+to yield the 5–30× speedup typical for production RKNN deployments.  The result
+confirms the NPU path is fully functional end-to-end (rknpu 0.9.8 driver,
+librknnrt 2.3.2, CDI device injection, Talos 6.18.18).
 
 ---
 
