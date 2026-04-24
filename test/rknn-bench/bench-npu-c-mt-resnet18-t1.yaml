@@ -1,15 +1,11 @@
 ---
-# RKNN C API benchmark Job — ResNet18 INT8
-#
-# Uses the native C API (rknn_init/rknn_run/rknn_outputs_get) directly,
-# bypassing the 3-5 ms Python/rknnlite per-call overhead to show true NPU
-# throughput.  Expected: ~500-1000 fps (vs ~137 fps with Python overhead).
-#
-# This job runs /bench_c (compiled in the v13 image), not bench.py.
+# RKNN C API multi-thread benchmark — ResNet18 INT8, 1 thread (baseline)
+# Single concurrent context: matches bench_c single-thread result (~146 fps).
+# Used as the baseline for the thread-scaling comparison.
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: rknn-bench-npu-c-resnet18
+  name: rknn-bench-npu-c-mt-resnet18-t1
   namespace: default
 spec:
   backoffLimit: 0
@@ -20,8 +16,7 @@ spec:
         - name: bench
           image: ghcr.io/schwankner/rk3588-rknn-bench:v14
           imagePullPolicy: Always
-          # Override ENTRYPOINT to run the C binary directly.
-          command: ["/bench_c", "/model/resnet18.rknn", "resnet18", "2000", "50"]
+          command: ["/bench_c_mt", "/model/resnet18.rknn", "resnet18", "1", "1000", "50"]
           env:
             - name: PYTHONUNBUFFERED
               value: "1"
@@ -32,8 +27,8 @@ spec:
           resources:
             limits:
               rockchip.com/npu: "1"
-              cpu: "2"
+              cpu: "4"
               memory: 512Mi
             requests:
-              cpu: "1"
+              cpu: "2"
               memory: 256Mi

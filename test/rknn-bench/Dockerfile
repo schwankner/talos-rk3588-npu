@@ -78,10 +78,11 @@ RUN python3 /tmp/compile_models.py
 # Stage 2: Final bench image (toolkit stripped, only compiled .rknn files kept)
 # ---------------------------------------------------------------------------
 FROM python:3.11-slim-bullseye
-# v13: Add native C API benchmark (bench_c) that bypasses Python/rknnlite overhead
-#      to show true NPU throughput (~500-1000 fps ResNet18 INT8, ~60-100 fps YOLOv5s).
-#      Add rknn.eval_perf() hardware profiling output to bench.py NPU runs.
-LABEL "bench.build"="v13"
+# v14: Add multi-threaded C API benchmark (bench_c_mt): N concurrent rknn_context
+#      threads start simultaneously via a pthread barrier, each owning its own NPU
+#      context.  With 3 threads the RK3588 NPU scheduler distributes work across all
+#      3 cores, showing the aggregate throughput the hardware is actually capable of.
+LABEL "bench.build"="v14"
 
 # gcc + libc6-dev are only needed to build the LD_PRELOAD shim and bench_c binary;
 # purged afterward to keep the image small.
@@ -95,9 +96,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # which breaks IDMAP mounts for hostPath volumes and kubelet log collection.
 COPY dt_compat_shim.c /tmp/
 COPY bench_c.c /tmp/
+COPY bench_c_mt.c /tmp/
 
-# Build dt_compat_shim.so and bench_c in the same layer so gcc is purged once.
-# bench_c links against librknnrt.so for compilation only (-L/tmp); the actual
+# Build dt_compat_shim.so, bench_c, and bench_c_mt in one layer so gcc is purged once.
+# Both C binaries link against librknnrt.so for compilation only (-L/tmp); the actual
 # library is injected at runtime by CDI at /usr/lib/librknnrt.so (-rpath).
 RUN curl -fsSL \
       "https://raw.githubusercontent.com/airockchip/rknn-toolkit2/v2.3.2/rknpu2/runtime/Linux/librknn_api/include/rknn_api.h" \
@@ -108,7 +110,10 @@ RUN curl -fsSL \
  && gcc -shared -fPIC -O2 -o /usr/lib/dt_compat_shim.so /tmp/dt_compat_shim.c -ldl \
  && gcc -O2 -o /bench_c /tmp/bench_c.c \
         -I/tmp -L/tmp -lrknnrt -Wl,-rpath,/usr/lib -lpthread -lm \
- && rm /tmp/dt_compat_shim.c /tmp/bench_c.c /tmp/rknn_api.h /tmp/librknnrt.so \
+ && gcc -O2 -o /bench_c_mt /tmp/bench_c_mt.c \
+        -I/tmp -L/tmp -lrknnrt -Wl,-rpath,/usr/lib -lpthread -lm \
+ && rm /tmp/dt_compat_shim.c /tmp/bench_c.c /tmp/bench_c_mt.c \
+       /tmp/rknn_api.h /tmp/librknnrt.so \
  && apt-get purge -y gcc && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
 
 # Activate the shim for all processes in the container (build-time ENV is
