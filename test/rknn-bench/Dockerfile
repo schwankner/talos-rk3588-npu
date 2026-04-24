@@ -81,6 +81,7 @@ FROM python:3.11-slim-bullseye
 # v15: Fix bench_c_mt deadlock: replace RKNN_NPU_CORE_AUTO with explicit per-core
 #      pinning (thread_id % 3 → CORE_0/1/2).  CORE_AUTO on concurrent contexts
 #      causes rknpu.ko command-queue deadlock and node crash (Bug 49).
+#      Fix build: rknn_core_mask_t → rknn_core_mask (correct type in v2.3.2 header).
 LABEL "bench.build"="v15"
 
 # gcc + libc6-dev are only needed to build the LD_PRELOAD shim and bench_c binary;

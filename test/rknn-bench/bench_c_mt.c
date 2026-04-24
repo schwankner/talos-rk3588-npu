@@ -108,7 +108,7 @@ static void *bench_thread(void *arg)
      * when N contexts all submit to "any free core" simultaneously.
      * Pinning each context to a specific core guarantees no two contexts
      * compete for the same hardware queue. */
-    static const rknn_core_mask_t core_map[3] = {
+    static const rknn_core_mask core_map[3] = {
         RKNN_NPU_CORE_0, RKNN_NPU_CORE_1, RKNN_NPU_CORE_2
     };
     rknn_set_core_mask(ctx, core_map[res->thread_id % 3]);
