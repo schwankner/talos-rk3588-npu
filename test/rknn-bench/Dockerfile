@@ -48,6 +48,7 @@ RUN curl -fsSL \
         "onnx==1.16.1" "onnxruntime>=1.16.0" \
         "scipy>=1.9.3" "psutil>=5.9.0" "ruamel.yaml>=0.17.21" \
         "tqdm>=4.64.1" "fast-histogram>=0.11" "opencv-python-headless>=4.5.5" \
+        "torch==2.2.0" \
  && pip install --no-cache-dir --no-deps /tmp/${RKNN2_WHL} \
  && rm /tmp/${RKNN2_WHL}
 
