@@ -1,15 +1,16 @@
 ---
 # RKNN CPU baseline benchmark Job
-# Runs ResNet18 inferences WITHOUT the NPU resource as a CPU baseline.
-# librknnrt.so falls back to ARM CPU execution when /dev/rknpu is absent.
+# Runs ResNet18 inferences on ARM CPU cores.
 #
-# librknnrt.so is supplied via hostPath volume — no CDI here.
-# The hostPath type is omitted (not "File") because Talos system-extension
-# files in /usr/lib are symlinks; type: File rejects symlinks.
+# librknnrt.so always requires /dev/rknpu and /dev/dma_heap/system to
+# initialise, even when inference runs on CPU — it uses the driver for
+# memory allocation.  We therefore still request rockchip.com/npu: "1"
+# so CDI injects those devices; the CPU-vs-NPU distinction is in how
+# bench.py calls init_runtime: --mode cpu passes no core_mask, so
+# librknnrt.so runs inference on ARM CPU cores rather than NPU cores.
 #
-# SoC detection: handled by the dt_compat_shim.so LD_PRELOAD baked into
-# the image — intercepts C-level open("/proc/device-tree/compatible").
-# No procMount:Unmasked or hostUsers:false required.
+# SoC detection: procMount:Unmasked + hostUsers:false (same as NPU bench)
+# so librknnrt.so can read /proc/device-tree/compatible.
 #
 # Expected result: ~5-20 fps (50-200 ms/inference) — 10-50x slower than NPU
 apiVersion: batch/v1
@@ -22,34 +23,26 @@ spec:
   template:
     spec:
       restartPolicy: Never
+      hostUsers: false
       containers:
         - name: bench
           image: ghcr.io/schwankner/rk3588-rknn-bench:v21
-          imagePullPolicy: Always
+          imagePullPolicy: IfNotPresent
           args: ["--mode", "cpu", "--iterations", "50"]
           env:
             - name: PYTHONUNBUFFERED
               value: "1"
           securityContext:
             allowPrivilegeEscalation: false
+            procMount: Unmasked
             capabilities:
               drop: ["ALL"]
-          # Manually bind librknnrt.so so the RKNN runtime can initialise
-          # (without CDI it isn't injected automatically)
-          volumeMounts:
-            - name: librknnrt
-              mountPath: /usr/lib/librknnrt.so
-              readOnly: true
           resources:
             limits:
+              rockchip.com/npu: "1"
               cpu: "4"
               memory: 512Mi
             requests:
+              rockchip.com/npu: "1"
               cpu: "2"
               memory: 256Mi
-      volumes:
-        - name: librknnrt
-          hostPath:
-            path: /usr/lib/librknnrt.so
-            # type omitted — Talos system-extension files are symlinks,
-            # and "File" would reject them
