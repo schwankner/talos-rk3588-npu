@@ -36,18 +36,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install rknn-toolkit2 2.3.2 ARM64 wheel (no torch dependency needed for ONNX→RKNN).
-# onnxoptimizer is omitted: it requires cmake ≥ 3.19 but bullseye only has 3.18,
-# and it is an optional graph-optimization pass — not required for rknn.load_onnx().
+# onnxoptimizer is omitted: it requires cmake ≥ 3.19 but bullseye only has 3.18.
+# The wheel must be saved with its full platform-tagged filename so pip can verify
+# Python/ABI/platform compatibility before installing.
+ENV RKNN2_WHL=rknn_toolkit2-2.3.2-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
 RUN curl -fsSL \
-    "https://raw.githubusercontent.com/airockchip/rknn-toolkit2/master/rknn-toolkit2/packages/arm64/rknn_toolkit2-2.3.2-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl" \
-    -o /tmp/rknn_toolkit2.whl \
+    "https://raw.githubusercontent.com/airockchip/rknn-toolkit2/master/rknn-toolkit2/packages/arm64/${RKNN2_WHL}" \
+    -o /tmp/${RKNN2_WHL} \
  && pip install --no-cache-dir \
         "protobuf==3.20.3" "numpy<=1.26.4" "Pillow>=10.0.1" \
         "onnx==1.16.1" "onnxruntime>=1.16.0" \
         "scipy>=1.9.3" "psutil>=5.9.0" "ruamel.yaml>=0.17.21" \
         "tqdm>=4.64.1" "fast-histogram>=0.11" "opencv-python-headless>=4.5.5" \
- && pip install --no-cache-dir --no-deps /tmp/rknn_toolkit2.whl \
- && rm /tmp/rknn_toolkit2.whl
+ && pip install --no-cache-dir --no-deps /tmp/${RKNN2_WHL} \
+ && rm /tmp/${RKNN2_WHL}
 
 # Download ResNet50-v2 ONNX (~97 MB) from the ONNX model zoo (git-lfs CDN)
 RUN curl -fsSL \
