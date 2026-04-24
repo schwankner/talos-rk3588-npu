@@ -1715,4 +1715,59 @@ order-of-magnitude speedup.
 
 ---
 
+## Bug 48: OOT module build fails with LLVM=1 — `clang: not found` (Talos 1.13)
+
+**Symptom:** `make: clang: No such file or directory` / `/bin/sh: clang: not found`
+when building `rknpu.ko` against the Talos 1.13.x kernel with `LLVM=1`.
+
+```
+make[2]: clang: No such file or directory
+The kernel was built by: clang version 22.1.2
+You are using:
+/bin/sh: clang: not found
+make[3]: *** [scripts/Makefile.build:287: src/rknpu_drv.o] Error 127
+```
+
+**Root cause:** Talos 1.13.x (pkgs `b121566`) switched the kernel build from GCC
+(`toolchain-musl`) to Clang 22.1.2 / ThinLTO (`toolchain-llvm`).  `LLVM=1` tells
+the kernel Makefile to use `CC=clang`, but our `rockchip-rknpu/pkg.yaml` only
+depended on `stage: base` + `stage: kernel-build`.  `stage: base` is built from
+`ghcr.io/siderolabs/tools`, which does not include the LLVM toolchain.
+
+**Solution:** Add `ghcr.io/siderolabs/llvm` as a bldr image dependency in
+`rockchip-rknpu/pkg.yaml`, exactly as the upstream `kernel-prepare` stage does:
+
+```yaml
+dependencies:
+  - stage: base
+  - image: "{{ .LLVM_IMAGE }}:{{ .TOOLS_REV }}"   # ← adds clang/lld to PATH
+  - stage: kernel-build
+```
+
+`LLVM_IMAGE` and `TOOLS_REV` are defined in the siderolabs/pkgs `Pkgfile`
+(`ghcr.io/siderolabs/llvm` and `v1.13.0-beta.0-3-gc192d81`).  Because our
+`pkg.yaml` is injected into the pkgs tree at build time, these variables are
+available.
+
+**Note:** Bug 8 is the inverse: with a GCC kernel (Talos 1.12.x), do NOT add
+`LLVM=1` or the LLVM image — clang receives GCC-only kernel CFLAGS and fails.
+
+---
+
+**Talos 1.13.0-rc.0 validation — Turing RK1 (RK3588), kernel 6.18.22-talos:**
+
+| Model | Quant | Mode | Throughput | Latency | Speedup |
+|-------|-------|------|-----------|---------|---------|
+| ResNet18 224×224 | INT8 | NPU (RK3588) | 137.0 fps | 7.30 ms | 0.98× |
+| ResNet18 224×224 | INT8 | CPU (ARM Cortex-A76) | 139.6 fps | 7.16 ms | 1.0× (baseline) |
+| YOLOv5s 640×640 | INT8 | NPU (RK3588) |  26.0 fps | 38.51 ms | 1.20× |
+| YOLOv5s 640×640 | INT8 | CPU (ARM Cortex-A76) |  21.6 fps | 46.33 ms | 1.0× (baseline) |
+
+Results consistent with the Talos 1.12.6 baseline (see INT8 benchmark results above).
+CDI spec is now provided as a static extension file at `/etc/cdi/rockchip-npu.yaml`
+instead of being written at runtime by the device plugin.  No machine config
+containerd patch required on Talos 1.13.
+
+---
+
 *Add new bugs above this line, most recent first.*
