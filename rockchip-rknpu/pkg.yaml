@@ -12,6 +12,9 @@ dependencies:
   # LLVM=1 must be passed to make so the OOT module is compiled with clang
   # and uses the same LLVM IR ABI as the in-tree objects.  Without it, GCC
   # produces incompatible relocations and module signing fails.
+  # The LLVM_IMAGE dependency (ghcr.io/siderolabs/llvm) provides clang/lld in
+  # PATH so that LLVM=1 can find them.  Mirrors the kernel-prepare dependency.
+  - image: "{{ .LLVM_IMAGE }}:{{ .TOOLS_REV }}"
   - stage: kernel-build
 steps:
   - sources:
