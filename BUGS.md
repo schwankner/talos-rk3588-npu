@@ -1768,6 +1768,43 @@ CDI spec is now provided as a static extension file at `/etc/cdi/rockchip-npu.ya
 instead of being written at runtime by the device plugin.  No machine config
 containerd patch required on Talos 1.13.
 
+**C API benchmark results — Talos 1.13.0-rc.0, kernel 6.18.22, SDK 2.3.2:**
+
+Native C benchmark (`bench_c`) using `rknn_init` / `rknn_run` / `rknn_outputs_get`
+directly — no Python or rknnlite overhead.  2000 iterations / 50 warmup for ResNet18,
+500 iterations / 20 warmup for YOLOv5s.
+
+| Model | Quant | Mode | Throughput | Latency | vs Python API |
+|-------|-------|------|-----------|---------|---------------|
+| ResNet18 224×224 | INT8 | NPU C API (RK3588) | 146.3 fps | 6.84 ms | +6.8% / −0.46 ms |
+| ResNet18 224×224 | INT8 | NPU Python rknnlite | 137.0 fps | 7.30 ms | (baseline) |
+| YOLOv5s 640×640 | INT8 | NPU C API (RK3588) |  21.5 fps | 46.41 ms | −17% (thermal) |
+| YOLOv5s 640×640 | INT8 | NPU Python rknnlite |  26.0 fps | 38.51 ms | (baseline) |
+
+**Key finding:** The rknnlite Python API overhead in SDK 2.3.2 is only **~0.5 ms**
+per call (not the 3–5 ms often cited for older SDKs).  Bypassing Python entirely with
+the C API gives ~7% improvement for ResNet18 — not the order-of-magnitude speedup
+the hypothesis predicted.
+
+The YOLOv5s C API result is *worse* than Python because the longer sustained run
+(500 iterations, 23 s) triggers NPU thermal throttling on the Turing RK1; the
+Python run used only 100 iterations (~4 s) and did not throttle.
+
+**True bottleneck:** For batch-1 synchronous inference the bottleneck is NPU
+execution time plus DMA buffer transfers (150 KB input for ResNet18, 1.2 MB for
+YOLOv5s), not the language binding.  Both Python and C saturate at ~6–7 ms for
+ResNet18 INT8.
+
+**To achieve the advertised 10-12× NPU speedup** you need one or more of:
+- **Concurrent contexts:** spawn N threads each with their own `rknn_init` context
+  to pipeline NPU and DMA work (the NPU can queue multiple jobs)
+- **Batch size > 1:** compile the model with `batch_size=4` or `batch_size=8` so
+  the NPU processes multiple frames per dispatch (amortises per-call overhead)
+- **Asynchronous API:** `rknn_run` with async flag + `rknn_wait` to overlap CPU
+  pre-processing with NPU execution
+- **Larger models:** overhead is proportionally smaller for heavy models (e.g.
+  ResNet50 fp16 at 34 ms per call — API overhead is <2% of total)
+
 ---
 
 *Add new bugs above this line, most recent first.*
