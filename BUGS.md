@@ -1807,6 +1807,55 @@ ResNet18 INT8.
 
 ---
 
+## Bug 50: BuildKit layer-diff bug zero-truncates gcc output binaries in final image stage
+
+**Symptom:** `exec /bench_c: exec format error` / `exec /bench_c_mt: exec format error`
+at pod startup.  Inspecting the image shows the compiled binaries are **0 bytes**:
+
+```
+-rwxr-xr-x. 1 root root 0 Apr 24 20:57 /bench_c
+-rwxr-xr-x. 1 root root 0 Apr 24 20:57 /bench_c_mt
+```
+
+`dt_compat_shim.so` is also affected (`file too short` error from ld.so on preload).
+
+**Trigger:** BuildKit layer-diff truncation occurs when a large binary download
+(~190 MB `librknnrt.so` via curl), gcc compilation, and `apt-get purge` all execute
+in the same `RUN` layer of the *final* multi-stage image.  The layer-diff algorithm
+zeros out the gcc output files when computing the diff between pre- and post-purge
+states.  The build reports **success** despite the binaries being empty.
+
+The same class of bug is documented at the top of the Dockerfile for the python3.11
+binary on ubuntu:22.04 — fixed there by using `python:3.11-slim-bullseye` (python3.11
+pre-baked in base layers, not installed in a diff-prone RUN step).
+
+**Why it was intermittent:** BuildKit caches the RUN layer output.  When `bench_c.c`
+was unchanged (v13→v14), the cache was reused and the valid binaries from v13 were
+served.  v15 modified `bench_c_mt.c`, busting the cache and forcing the RUN layer to
+re-execute — this re-execution triggered the truncation.
+
+**Solution:** Move all gcc compilation into a dedicated `c-compiler` stage and
+`COPY --from=c-compiler` the binaries into the final stage.  A `COPY --from`
+instruction is a plain file copy — the BuildKit diff algorithm cannot truncate it:
+
+```dockerfile
+FROM python:3.11-slim-bullseye AS c-compiler
+RUN apt-get update && apt-get install -y gcc libc6-dev curl ca-certificates ...
+COPY dt_compat_shim.c bench_c.c bench_c_mt.c /tmp/
+RUN curl ... && gcc ... -o /bench_c ... && gcc ... -o /bench_c_mt ...
+
+FROM python:3.11-slim-bullseye   # final stage — no gcc, no apt-purge
+COPY --from=c-compiler /bench_c     /bench_c
+COPY --from=c-compiler /bench_c_mt  /bench_c_mt
+COPY --from=c-compiler /dt_compat_shim.so /usr/lib/dt_compat_shim.so
+```
+
+**Rule:** Never compile binaries in the same `RUN` layer as a large file download
+(>50 MB) and `apt-get purge` in a multi-stage final stage.  Always use a dedicated
+builder stage and `COPY --from` the outputs.
+
+---
+
 ## Bug 49: Concurrent `RKNN_NPU_CORE_AUTO` contexts deadlock rknpu.ko and crash the node
 
 **Symptom:** Multi-context concurrent inference with `RKNN_NPU_CORE_AUTO` hangs

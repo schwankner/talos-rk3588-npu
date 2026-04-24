@@ -7,7 +7,7 @@
 #
 # Build (ARM64 native or via buildx):
 #   docker buildx build --platform linux/arm64 \
-#     -t ghcr.io/schwankner/rk3588-rknn-bench:v12 --push .
+#     -t ghcr.io/schwankner/rk3588-rknn-bench:v16 --push .
 #
 # Base image selection history:
 #   python:3.11-slim (Trixie/glibc 2.40+): BTI/PAC exec format errors on RK3588
@@ -17,6 +17,13 @@
 #     BuildKit layer-diff bug when installing large binaries via apt in a RUN step
 #   python:3.11-slim-bullseye (Debian 11/glibc 2.31): python3.11 pre-baked in
 #     base layers (no BuildKit diff/truncation), glibc 2.31 works on this kernel.
+#
+# C binary build isolation (v16+):
+#   gcc compilation of bench_c, bench_c_mt, and dt_compat_shim.so was moved into
+#   a dedicated c-compiler stage.  The binaries are then COPY --from'd into the
+#   final stage.  This avoids the BuildKit layer-diff truncation bug that zeroed
+#   the compiled binaries when the large librknnrt.so download + gcc compile +
+#   apt-purge all landed in the same RUN layer of the final stage (Bug 50).
 
 # ---------------------------------------------------------------------------
 # Stage 1: Compile models ONNX → RK3588 RKNN (toolkit 2.3.2, ARM64)
@@ -75,46 +82,52 @@ COPY compile_models.py /tmp/compile_models.py
 RUN python3 /tmp/compile_models.py
 
 # ---------------------------------------------------------------------------
-# Stage 2: Final bench image (toolkit stripped, only compiled .rknn files kept)
+# Stage 2: C binary compiler
+#
+# Isolated from the final stage so the BuildKit layer-diff bug (which
+# zero-truncates compiled binaries when a large download + gcc + apt-purge
+# all land in the same RUN layer) cannot affect the output.  Binaries are
+# COPY --from'd into the final stage as plain file copies.
 # ---------------------------------------------------------------------------
-FROM python:3.11-slim-bullseye
-# v15: Fix bench_c_mt deadlock: replace RKNN_NPU_CORE_AUTO with explicit per-core
-#      pinning (thread_id % 3 → CORE_0/1/2).  CORE_AUTO on concurrent contexts
-#      causes rknpu.ko command-queue deadlock and node crash (Bug 49).
-#      Fix build: rknn_core_mask_t → rknn_core_mask (correct type in v2.3.2 header).
-LABEL "bench.build"="v15"
+FROM python:3.11-slim-bullseye AS c-compiler
 
-# gcc + libc6-dev are only needed to build the LD_PRELOAD shim and bench_c binary;
-# purged afterward to keep the image small.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libgomp1 strace ca-certificates file curl gcc libc6-dev \
+        gcc libc6-dev curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# dt_compat_shim: intercepts the C-level open("/proc/device-tree/compatible")
-# that rknnlite's Cython init_runtime() uses for SoC detection.  Without this
-# shim, pods would need procMount:Unmasked + hostUsers:false (user namespaces),
-# which breaks IDMAP mounts for hostPath volumes and kubelet log collection.
-COPY dt_compat_shim.c /tmp/
-COPY bench_c.c /tmp/
-COPY bench_c_mt.c /tmp/
+COPY dt_compat_shim.c bench_c.c bench_c_mt.c /tmp/
 
-# Build dt_compat_shim.so, bench_c, and bench_c_mt in one layer so gcc is purged once.
-# Both C binaries link against librknnrt.so for compilation only (-L/tmp); the actual
-# library is injected at runtime by CDI at /usr/lib/librknnrt.so (-rpath).
+# Download rknn_api.h and librknnrt.so (link-time only; runtime lib injected by CDI).
+# librknnrt.so is ~190 MB — keeping it in a dedicated stage prevents the
+# BuildKit layer-diff truncation bug from zeroing the gcc output binaries.
 RUN curl -fsSL \
       "https://raw.githubusercontent.com/airockchip/rknn-toolkit2/v2.3.2/rknpu2/runtime/Linux/librknn_api/include/rknn_api.h" \
       -o /tmp/rknn_api.h \
  && curl -fsSL \
       "https://github.com/airockchip/rknn-toolkit2/raw/v2.3.2/rknpu2/runtime/Linux/librknn_api/aarch64/librknnrt.so" \
       -o /tmp/librknnrt.so \
- && gcc -shared -fPIC -O2 -o /usr/lib/dt_compat_shim.so /tmp/dt_compat_shim.c -ldl \
+ && gcc -shared -fPIC -O2 -o /dt_compat_shim.so /tmp/dt_compat_shim.c -ldl \
  && gcc -O2 -o /bench_c /tmp/bench_c.c \
         -I/tmp -L/tmp -lrknnrt -Wl,-rpath,/usr/lib -lpthread -lm \
  && gcc -O2 -o /bench_c_mt /tmp/bench_c_mt.c \
-        -I/tmp -L/tmp -lrknnrt -Wl,-rpath,/usr/lib -lpthread -lm \
- && rm /tmp/dt_compat_shim.c /tmp/bench_c.c /tmp/bench_c_mt.c \
-       /tmp/rknn_api.h /tmp/librknnrt.so \
- && apt-get purge -y gcc && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+        -I/tmp -L/tmp -lrknnrt -Wl,-rpath,/usr/lib -lpthread -lm
+
+# ---------------------------------------------------------------------------
+# Stage 3: Final bench image (toolkit stripped, only compiled .rknn files kept)
+# ---------------------------------------------------------------------------
+FROM python:3.11-slim-bullseye
+# v16: Move C compilation into isolated c-compiler stage; COPY --from to avoid
+#      BuildKit layer-diff zero-truncation of gcc output binaries (Bug 50).
+LABEL "bench.build"="v16"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libgomp1 strace ca-certificates file curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# C binaries copied from c-compiler stage — not subject to layer-diff truncation.
+COPY --from=c-compiler /dt_compat_shim.so  /usr/lib/dt_compat_shim.so
+COPY --from=c-compiler /bench_c            /bench_c
+COPY --from=c-compiler /bench_c_mt         /bench_c_mt
 
 # Activate the shim for all processes in the container (build-time ENV is
 # only set in the final image, not during earlier RUN steps).

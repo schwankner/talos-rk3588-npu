@@ -16,7 +16,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: bench
-          image: ghcr.io/schwankner/rk3588-rknn-bench:v15
+          image: ghcr.io/schwankner/rk3588-rknn-bench:v16
           imagePullPolicy: Always
           args: ["--mode", "npu", "--model", "yolov5s", "--iterations", "100"]
           env:
