@@ -1,15 +1,12 @@
 ---
 # RKNN NPU benchmark Job
-# Runs 200 ResNet18 inferences on the RK3588 NPU via CDI injection.
+# Runs YOLOv5s (640x640, ~16 GFLOPS) inferences on the RK3588 NPU via CDI.
 # CDI provides: /dev/rknpu (BSP misc device), /usr/lib/librknnrt.so
 #
-# SoC detection: rknnlite's Cython init_runtime() opens
-# /proc/device-tree/compatible at the C level.  The image ships a
-# dt_compat_shim.so (LD_PRELOAD) that intercepts this specific open()
-# and returns the RK3588 compatible string from a memfd — no
-# procMount:Unmasked or hostUsers:false required.
+# SoC detection: handled by dt_compat_shim.so LD_PRELOAD baked into the image.
+# No procMount:Unmasked or hostUsers:false required.
 #
-# Expected result: ~100-300 fps (< 10 ms/inference)
+# Expected result: ~30-100 fps (< 30 ms/inference) for YOLOv5s
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -22,9 +19,9 @@ spec:
       restartPolicy: Never
       containers:
         - name: bench
-          image: ghcr.io/schwankner/rk3588-rknn-bench:v21
+          image: ghcr.io/schwankner/rk3588-rknn-bench:v22
           imagePullPolicy: Always
-          args: ["--mode", "npu", "--iterations", "200"]
+          args: ["--mode", "npu", "--model", "yolov5s", "--iterations", "200"]
           env:
             - name: PYTHONUNBUFFERED
               value: "1"

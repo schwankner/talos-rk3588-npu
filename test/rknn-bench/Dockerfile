@@ -18,8 +18,8 @@
 #   python:3.11-slim-bullseye (Debian 11/glibc 2.31): python3.11 pre-baked in
 #     base layers (no BuildKit diff/truncation), glibc 2.31 works on this kernel.
 FROM python:3.11-slim-bullseye
-# v21: force new chain IDs again; use_local_image_pull=false now set in CRI config.
-LABEL "bench.build"="v21"
+# v22: add YOLOv5s-640 model (~16 GFLOPS) to demonstrate clear NPU speedup.
+LABEL "bench.build"="v22"
 
 # gcc + libc6-dev are only needed to build the LD_PRELOAD shim; purged afterward.
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -50,8 +50,11 @@ RUN pip install --no-cache-dir \
 # Pre-converted ResNet18 model for RK3588 (from rknn-toolkit2 examples)
 COPY resnet18.rknn /model/resnet18.rknn
 
-# Reference image for the real-input test
-COPY space_shuttle_224.jpg /model/space_shuttle_224.jpg
+# YOLOv5s 640×640 model for RK3588 — ~16 GFLOPS, shows clear NPU speedup.
+# Source: airockchip/rknn-toolkit2 examples, confirmed accessible via raw.githubusercontent.com
+RUN curl -fsSL \
+    "https://raw.githubusercontent.com/airockchip/rknn-toolkit2/master/rknpu2/examples/rknn_yolov5_demo/model/RK3588/yolov5s-640-640.rknn" \
+    -o /model/yolov5s.rknn
 
 COPY bench.py /bench.py
 COPY bench_v9.py /bench_v9.py
