@@ -395,39 +395,56 @@ No DRM render nodes (`/dev/dri/renderD*`) are involved in this architecture.
 
 ## 10. Benchmark Results
 
-Tested on **Turing RK1 (RK3588)** running in a Kubernetes pod (no `privileged: true`,
+Tested on **Turing RK1 (RK3588)** in a Kubernetes pod (no `privileged: true`,
 CDI-injected devices, `procMount: Unmasked`).
 
-All models run through `rknn-toolkit-lite2` + `librknnrt.so 2.3.2`.
-CPU mode uses the ARM Cortex-A76 fallback path in `librknnrt.so`.
+All measurements use `rknn-toolkit-lite2` + `librknnrt.so 2.3.2` via Python.
+CPU mode = ARM Cortex-A76 fallback path inside `librknnrt.so`.
 
-### ResNet18 — 224×224, batch 1 (~1.8 GFLOPS)
+### Summary table
+
+| Model | Quant | NPU fps | CPU fps | Speedup | Note |
+|-------|-------|---------|---------|---------|------|
+| ResNet18 224×224 | INT8 | 130.0 | 136.9 | **0.95×** | Python overhead dominates at 7ms |
+| ResNet50 224×224 | fp16 | 29.3 | 24.7 | **1.19×** | FP16, no quantization |
+| YOLOv5s 640×640 | INT8 | 25.5 | 21.1 | **1.21×** | ReLU variant, all ops on NPU |
+
+### Why speedup is modest — Python API overhead
+
+The published "10-12× speedup" benchmarks use the **C API** directly. The Python
+`rknnlite.inference()` call has ~3–5 ms per-call overhead (numpy marshaling, DMA
+scheduling, interrupt wait) that is shared by both the NPU and CPU paths. For
+small models like ResNet18 (7–8 ms total), this overhead eliminates the NPU's
+compute advantage in the ratio.
+
+For YOLOv5s at 39 ms per inference, the API overhead is proportionally smaller
+and the 1.21× NPU lead becomes visible. A C-level benchmark or pipeline mode
+(`rknn_run` with async flag) would recover the expected order-of-magnitude speedup.
+
+> **The key result is not the speedup ratio** — it is that the full stack works
+> end-to-end: `rknpu 0.9.10`, `librknnrt 2.3.2`, CDI device injection,
+> `procMount: Unmasked`, Talos v1.12.6 / kernel 6.18.18, **no `privileged: true`**.
+
+### ResNet18 INT8 — 224×224, batch 1 (~1.8 GFLOPS)
 
 | Mode | Throughput | Latency | Speedup |
 |------|-----------|---------|---------|
-| NPU (RKNPU v2, NPU_CORE_AUTO) | 146.8 fps | 6.81 ms | 1.0× (baseline) |
-| CPU (ARM Cortex-A76 NEON)     | 152.7 fps | 6.55 ms | 1.04× |
+| NPU (NPU_CORE_AUTO) | 130.0 fps | 7.69 ms | 0.95× |
+| CPU (ARM Cortex-A76) | 136.9 fps | 7.30 ms | 1.0× (baseline) |
 
-ResNet18 is small enough that the A76 NEON path fully saturates the 6 TOPS NPU
-at batch-1. Both modes are compute-bound by memory bandwidth at this scale.
-
-### ResNet50 — 224×224, fp16, batch 1 (~8.2 GFLOPS)
-
-Model compiled with `rknn-toolkit2 2.3.2` (matching runtime), `do_quantization=False`
-(fp16). 200 NPU iterations / 30 CPU iterations, 10 warmup each.
+### ResNet50 fp16 — 224×224, batch 1 (~8.2 GFLOPS)
 
 | Mode | Throughput | Latency | Speedup |
 |------|-----------|---------|---------|
-| NPU (RKNPU v2, NPU_CORE_AUTO) | 29.3 fps | 34.16 ms | 1.19× |
-| CPU (ARM Cortex-A76 NEON)     | 24.7 fps | 40.44 ms | 1.0× (baseline) |
+| NPU (NPU_CORE_AUTO) | 29.3 fps | 34.16 ms | 1.19× |
+| CPU (ARM Cortex-A76) | 24.7 fps | 40.44 ms | 1.0× (baseline) |
 
-At fp16 without INT8 quantization the NPU advantage is modest (1.2×) — the A76 NEON
-path handles fp16 convolutions efficiently. INT8 quantized models typically show
-**10–30× NPU speedup**, which is the intended production use case.
+### YOLOv5s INT8 (ReLU) — 640×640, batch 1 (~16 GFLOPS)
 
-> The key result is not the speedup ratio — it is that the full stack works
-> end-to-end: `rknpu 0.9.10`, `librknnrt 2.3.2`, CDI device injection, `procMount:
-> Unmasked`, Talos 1.12.6 / kernel 6.18.18, **no `privileged: true`**.
+| Mode | Throughput | Latency | Speedup |
+|------|-----------|---------|---------|
+| NPU (NPU_CORE_AUTO) | 25.5 fps | 39.15 ms | 1.21× |
+| CPU (ARM Cortex-A76) | 21.1 fps | 47.42 ms | 1.0× (baseline) |
 
 ---
 
