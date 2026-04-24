@@ -1563,4 +1563,63 @@ tables, eliminating non-iommu mode entirely.  `iommu.passthrough=1` can then be 
 
 ---
 
+## Bug 47: init_runtime() fails with errno 38 — RKNPU_MEM_CREATE returns -ENOSYS
+
+**Symptom:** After Bug 46 eliminates the hard lockup, `init_runtime()` fails softly with
+errno 38 (ENOSYS). Node stays up (no lockup). Step 4 of the RKNN step test returns
+non-zero. RKNN library log:
+
+```
+E RKNN: [07:40:51.484] failed to allocate fd, ret: -1, errno: 38, errstr: Function not implemented
+E RKNN: [07:40:51.484] failed to malloc npu memory, size: 6120, flags: 0xa
+```
+
+**Root cause (two-layer failure):**
+
+The rknpu driver (w568w/rknpu-module) allocates internal NPU command buffers through an
+`rk_dma_heap` handle stored in `rknpu_dev->heap`.  The initialization chain:
+
+1. `rknpu_drv.c` calls `rk_dma_heap_find("rk-dma-heap-cma")` → returns `NULL` on
+   mainline 6.18 (no Rockchip BSP CMA heap registered).
+
+2. **Bug 36** added a fallback: `rk_dma_heap_find("system")` → also returns `NULL`.
+   `rk_dma_heap_find` is rknpu's **internal** heap registry, not the standard kernel
+   `dma_heap_find`.  The standard system heap is not registered in rknpu's registry.
+
+3. With `rknpu_dev->heap == NULL`, the original `rknpu_mem.c` stub returned `-ENOSYS`
+   for all memory ioctls.  The comment said librknnrt.so v2.3.x never calls
+   `RKNPU_MEM_CREATE` — this was incorrect.  The library calls it during `init_runtime()`
+   to allocate small internal NPU command buffers (~6 KB).
+
+**Fix: Bug 47 — implement rknpu_mem_create_ioctl with standard DMA APIs**
+
+Replaced the -ENOSYS stub in `rockchip-rknpu/files/rknpu_mem.c` with a real
+implementation using `dma_alloc_coherent` + `anon_inode_getfd`:
+
+- `dma_alloc_coherent(rknpu_dev->dev, ...)`: allocates physically contiguous,
+  cache-coherent memory.  In `iommu.passthrough=1` mode, `dma_addr == phys_addr`,
+  which is what the NPU hardware uses for DMA submissions in non-IOMMU mode.
+
+- `anon_inode_getfd("[rknpu_mem]", &rknpu_mem_obj_fops, ...)`: returns a userspace fd.
+  The file's `.mmap` callback uses `dma_mmap_coherent` so the runtime can mmap the
+  buffer for CPU access.  The `.release` callback calls `dma_free_coherent`, tying
+  memory lifetime to fd lifetime (matches BSP `rk_dma_heap_bufferfd_alloc` semantics).
+
+`RKNPU_MEM_DESTROY` and `RKNPU_MEM_SYNC` remain no-ops: memory is freed by closing
+the fd; DMA-coherent memory needs no explicit cache maintenance on ARM64.
+
+**Key struct layout (`struct rknpu_mem_create` from rknpu_mem.h):**
+```c
+__u32 handle;          /* output: fd */
+__u32 flags;           /* input:  allocation flags (0xa = non-IOMMU+CMA) */
+__u64 size;            /* input:  allocation size in bytes */
+__u64 obj_addr;        /* output: kernel virtual address */
+__u64 dma_addr;        /* output: device DMA address (= physical in passthrough mode) */
+__u64 sram_size;
+__s32 iommu_domain_id;
+__u32 core_mask;
+```
+
+---
+
 *Add new bugs above this line, most recent first.*
