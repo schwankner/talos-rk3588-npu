@@ -1,7 +1,8 @@
 ---
 # RKNN C API multi-thread benchmark — ResNet18 INT8, 6 threads
-# 6 concurrent rknn_context threads = 2 per RK3588 NPU core (NPU_CORE_AUTO).
-# Tests whether the NPU scheduler can queue 2 jobs per core without stalling.
+# 6 concurrent rknn_context threads = 2 per RK3588 NPU core.
+# Threads pinned: 0,3→CORE_0  1,4→CORE_1  2,5→CORE_2.
+# Tests whether 2 queued jobs per core increases throughput vs 3 threads.
 # Expected: close to 3-thread result (NPU is the bottleneck, not thread count).
 apiVersion: batch/v1
 kind: Job
@@ -15,7 +16,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: bench
-          image: ghcr.io/schwankner/rk3588-rknn-bench:v14
+          image: ghcr.io/schwankner/rk3588-rknn-bench:v15
           imagePullPolicy: Always
           command: ["/bench_c_mt", "/model/resnet18.rknn", "resnet18", "6", "1000", "50"]
           env:

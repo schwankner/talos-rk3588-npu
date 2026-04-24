@@ -18,7 +18,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: bench
-          image: ghcr.io/schwankner/rk3588-rknn-bench:v14
+          image: ghcr.io/schwankner/rk3588-rknn-bench:v15
           imagePullPolicy: Always
           # Override ENTRYPOINT to run the C binary directly.
           command: ["/bench_c", "/model/yolov5s.rknn", "yolov5s", "500", "20"]

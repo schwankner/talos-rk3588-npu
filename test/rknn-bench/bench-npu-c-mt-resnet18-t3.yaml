@@ -1,7 +1,8 @@
 ---
 # RKNN C API multi-thread benchmark — ResNet18 INT8, 3 threads
-# 3 concurrent rknn_context threads = one per RK3588 NPU core (NPU_CORE_AUTO).
-# All threads start simultaneously via pthread barrier.
+# 3 concurrent rknn_context threads, each pinned to a distinct NPU core
+# (thread 0→CORE_0, 1→CORE_1, 2→CORE_2).  All threads start simultaneously
+# via pthread barrier.
 # Expected aggregate: ~3× single-thread = ~430 fps.
 apiVersion: batch/v1
 kind: Job
@@ -15,7 +16,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: bench
-          image: ghcr.io/schwankner/rk3588-rknn-bench:v14
+          image: ghcr.io/schwankner/rk3588-rknn-bench:v15
           imagePullPolicy: Always
           command: ["/bench_c_mt", "/model/resnet18.rknn", "resnet18", "3", "1000", "50"]
           env:

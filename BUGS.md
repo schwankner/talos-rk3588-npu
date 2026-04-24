@@ -1807,4 +1807,51 @@ ResNet18 INT8.
 
 ---
 
+## Bug 49: Concurrent `RKNN_NPU_CORE_AUTO` contexts deadlock rknpu.ko and crash the node
+
+**Symptom:** Multi-context concurrent inference with `RKNN_NPU_CORE_AUTO` hangs
+indefinitely with the following error repeated every ~6 s, and eventually the node
+becomes unreachable (API server timeout, requires hard reboot via BMC):
+
+```
+E RKNN: [HH:MM:SS.mmm] failed to submit!, op id: 1, op name: , flags: 0x5,
+        task start: 0, task number: 38, run task counter: 0,
+        int status: 0, If using rknn, update to the latest toolkit2...
+```
+
+**Trigger:** N threads, each with their own `rknn_context`, all calling
+`rknn_set_core_mask(ctx, RKNN_NPU_CORE_AUTO)` before starting concurrent inference
+loops that start simultaneously (e.g. via a `pthread_barrier`).
+
+**Root cause:** `RKNN_NPU_CORE_AUTO` lets the rknpu.ko driver assign the context to
+whichever NPU core is "free" at submit time.  When N contexts all attempt to submit
+simultaneously, the driver's command queue arbiter deadlocks — no context is assigned
+to a definitive core, so the submit spins forever.  The `run task counter: 0` in the
+error confirms no task has been dispatched despite repeated retries (~6 s interval).
+Eventually the NPU IRQ handler stops responding and the kernel panics or the API
+server becomes unreachable.
+
+**Solution:** Pin each context to a distinct NPU core explicitly before entering the
+inference loop:
+
+```c
+/* thread_id % 3 distributes threads across all 3 NPU cores */
+static const rknn_core_mask_t core_map[3] = {
+    RKNN_NPU_CORE_0, RKNN_NPU_CORE_1, RKNN_NPU_CORE_2
+};
+rknn_set_core_mask(ctx, core_map[thread_id % 3]);
+```
+
+With explicit pinning, each context submits to a private core queue — no arbitration
+contention — and all N threads run truly in parallel.
+
+**Rule:** Never use `RKNN_NPU_CORE_AUTO` in a multi-context concurrent setup.
+`RKNN_NPU_CORE_AUTO` is safe for single-context or sequential (non-overlapping) use only.
+`RKNN_NPU_CORE_0_1_2` (all 3 cores on a single context) is safe for single-context only.
+
+**Observed on:** rknpu.ko driver 0.9.8, librknnrt.so 2.3.2, Talos 1.13.0-rc.0 /
+kernel 6.18.22-talos, Turing RK1 (RK3588).
+
+---
+
 *Add new bugs above this line, most recent first.*

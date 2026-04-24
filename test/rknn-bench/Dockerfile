@@ -78,11 +78,10 @@ RUN python3 /tmp/compile_models.py
 # Stage 2: Final bench image (toolkit stripped, only compiled .rknn files kept)
 # ---------------------------------------------------------------------------
 FROM python:3.11-slim-bullseye
-# v14: Add multi-threaded C API benchmark (bench_c_mt): N concurrent rknn_context
-#      threads start simultaneously via a pthread barrier, each owning its own NPU
-#      context.  With 3 threads the RK3588 NPU scheduler distributes work across all
-#      3 cores, showing the aggregate throughput the hardware is actually capable of.
-LABEL "bench.build"="v14"
+# v15: Fix bench_c_mt deadlock: replace RKNN_NPU_CORE_AUTO with explicit per-core
+#      pinning (thread_id % 3 → CORE_0/1/2).  CORE_AUTO on concurrent contexts
+#      causes rknpu.ko command-queue deadlock and node crash (Bug 49).
+LABEL "bench.build"="v15"
 
 # gcc + libc6-dev are only needed to build the LD_PRELOAD shim and bench_c binary;
 # purged afterward to keep the image small.

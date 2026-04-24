@@ -8,8 +8,14 @@
  *
  * This reflects real inference-server usage: N concurrent requests arriving
  * at the same time, each dispatched to the NPU independently.  The RK3588
- * NPU has 3 cores; with 3 threads using NPU_CORE_AUTO the runtime pins each
- * context to a separate core, giving close to 3× single-thread throughput.
+ * NPU has 3 cores; each thread is pinned to a distinct core via explicit
+ * core mask (thread_id % 3 → CORE_0/1/2), giving close to 3× single-thread
+ * throughput.
+ *
+ * IMPORTANT: do NOT use RKNN_NPU_CORE_AUTO for multi-context concurrent
+ * inference.  When N threads all submit with AUTO simultaneously the rknpu.ko
+ * driver command queue deadlocks ("failed to submit!" loops) and the node
+ * eventually becomes unresponsive.  Explicit per-core assignment avoids this.
  *
  * Usage:
  *   bench_c_mt <model.rknn> <model_name> <threads> <iters_per_thread> [warmup]
@@ -96,7 +102,16 @@ static void *bench_thread(void *arg)
         return NULL;
     }
 
-    rknn_set_core_mask(ctx, RKNN_NPU_CORE_AUTO);
+    /* Explicit core pinning: thread_id % 3 → CORE_0/1/2.
+     * RKNN_NPU_CORE_AUTO must NOT be used with concurrent multi-context
+     * inference — it causes the rknpu.ko driver command queue to deadlock
+     * when N contexts all submit to "any free core" simultaneously.
+     * Pinning each context to a specific core guarantees no two contexts
+     * compete for the same hardware queue. */
+    static const rknn_core_mask_t core_map[3] = {
+        RKNN_NPU_CORE_0, RKNN_NPU_CORE_1, RKNN_NPU_CORE_2
+    };
+    rknn_set_core_mask(ctx, core_map[res->thread_id % 3]);
 
     /* Query I/O counts and first input shape */
     rknn_input_output_num io_num;

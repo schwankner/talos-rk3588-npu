@@ -1,6 +1,7 @@
 ---
 # RKNN C API multi-thread benchmark — YOLOv5s INT8, 3 threads
-# 3 concurrent rknn_context threads = one per RK3588 NPU core.
+# 3 concurrent rknn_context threads, each pinned to a distinct NPU core
+# (thread 0→CORE_0, 1→CORE_1, 2→CORE_2).
 # Expected aggregate: ~3× single-thread = ~75 fps vs ~21 fps CPU → ~3.5× speedup.
 # Fewer iterations (200/thread) to avoid thermal throttling on the sustained run.
 apiVersion: batch/v1
@@ -15,7 +16,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: bench
-          image: ghcr.io/schwankner/rk3588-rknn-bench:v14
+          image: ghcr.io/schwankner/rk3588-rknn-bench:v15
           imagePullPolicy: Always
           command: ["/bench_c_mt", "/model/yolov5s.rknn", "yolov5s", "3", "200", "20"]
           env:
