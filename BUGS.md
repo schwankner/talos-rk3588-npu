@@ -1852,8 +1852,28 @@ one per NPU sub-core) but only the first one has a complete rknpu binding.
 - Effective NPU capacity: **2 TOPS** (CORE_0 only), not the advertised 6 TOPS
 - Batch/pipeline multi-core acceleration not available
 - All benchmark results in this file are single-core (CORE_0 / AUTO) results
-- `bench_c_mt` (multi-thread, explicit core pinning) is therefore identical to
-  single-thread performance: CORE_0 at ~148 fps ResNet18 INT8
+
+**Multi-thread C API results (v18 image, all threads pinned to CORE_0, Talos 1.13.0-rc.0):**
+
+ResNet18 INT8 — aggregate throughput saturates at CORE_0 capacity:
+
+| threads | iters/thread | agg. throughput | per-thread latency | vs single-thread |
+|---------|-------------|-----------------|-------------------|-----------------|
+| 1       | 1000        | 146.1 fps       | 6.85 ms           | baseline         |
+| 3       | 1000        | 156.2 fps       | 19.20 ms (+2.8×)  | +7% aggregate    |
+| 6       | 1000        | 155.9 fps       | 38.47 ms (+5.6×)  | +7% aggregate    |
+
+YOLOv5s INT8 — 3 threads × 200 iters:
+
+| threads | agg. throughput | per-thread avg latency | vs single-thread |
+|---------|-----------------|------------------------|-----------------|
+| 1 (C API bench_c) | 21.5 fps  | 46.41 ms          | baseline         |
+| 3 (bench_c_mt)    | 38.8 fps  | 68.81 ms (+1.5×)  | +1.8× aggregate  |
+
+The small aggregate gain (~7% for ResNet18, 1.8× for YOLOv5s) is not multi-core
+parallelism but DMA/setup pipelining: while one context's inference is running,
+another thread's `rknn_inputs_set` pre-stages the next input buffer.  All threads
+serialize on the single NPU command queue.
 
 **Diagnostic:**
 
