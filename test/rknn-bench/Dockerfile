@@ -33,16 +33,17 @@ FROM python:3.11-slim-bullseye AS model-compiler
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl ca-certificates libgomp1 libglib2.0-0 \
-        cmake build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install rknn-toolkit2 2.3.2 ARM64 wheel (no torch dependency needed for ONNX)
+# Install rknn-toolkit2 2.3.2 ARM64 wheel (no torch dependency needed for ONNX→RKNN).
+# onnxoptimizer is omitted: it requires cmake ≥ 3.19 but bullseye only has 3.18,
+# and it is an optional graph-optimization pass — not required for rknn.load_onnx().
 RUN curl -fsSL \
     "https://raw.githubusercontent.com/airockchip/rknn-toolkit2/master/rknn-toolkit2/packages/arm64/rknn_toolkit2-2.3.2-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl" \
     -o /tmp/rknn_toolkit2.whl \
  && pip install --no-cache-dir \
         "protobuf==3.20.3" "numpy<=1.26.4" "Pillow>=10.0.1" \
-        "onnx==1.16.1" "onnxoptimizer==0.3.8" "onnxruntime>=1.16.0" \
+        "onnx==1.16.1" "onnxruntime>=1.16.0" \
         "scipy>=1.9.3" "psutil>=5.9.0" "ruamel.yaml>=0.17.21" \
         "tqdm>=4.64.1" "fast-histogram>=0.11" "opencv-python-headless>=4.5.5" \
  && pip install --no-cache-dir --no-deps /tmp/rknn_toolkit2.whl \
