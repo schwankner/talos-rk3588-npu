@@ -114,10 +114,10 @@ CDI device plugin (rockchip.com/npu: "1" in resources.limits)
 talosctl upgrade \
   --nodes <NODE_IP> \
   --talosconfig ./npu-test-talosconfig \
-  --image ghcr.io/schwankner/talos-rk3588-npu-installer-base:installer-v1.12.6 \
+  --image ghcr.io/schwankner/talos-rk3588-npu-installer-base:installer-v1.13.0-rc.0 \
   --preserve
 
-# 2. Apply machine config (adds NPU extensions + CDI containerd config)
+# 2. Apply machine config (adds NPU extensions)
 talosctl apply-config \
   --nodes <NODE_IP> \
   --talosconfig ./npu-test-talosconfig \
@@ -199,9 +199,9 @@ All versions are pinned in `scripts/common.sh`.
 
 | Component | Version | Notes |
 |-----------|---------|-------|
-| Talos Linux | v1.12.6 | |
-| Linux kernel | 6.18.18-talos | Mainline, OE4T patches |
-| siderolabs/pkgs | a92bed5 | Pinned to Talos v1.12.6 |
+| Talos Linux | v1.13.0-rc.0 | CDI enabled in containerd by default |
+| Linux kernel | 6.18.22-talos | Mainline, Clang/ThinLTO build |
+| siderolabs/pkgs | b121566 | Pinned to Talos v1.13.0-rc.0 |
 | rknpu driver | 0.9.10 | [w568w/rknpu-module](https://github.com/w568w/rknpu-module), mainline-compatible |
 | librknnrt.so | 2.3.2 | [airockchip/rknn-toolkit2](https://github.com/airockchip/rknn-toolkit2) |
 
@@ -236,10 +236,10 @@ Push to `main` with a change to `scripts/common.sh`:
 
 | Image | Tag format | Example |
 |-------|-----------|---------|
-| `ghcr.io/schwankner/rockchip-rknpu` | `<rknpu>-<kernel>` | `0.9.10-6.18.18-talos` |
-| `ghcr.io/schwankner/rockchip-rknn-libs` | `<rknn>-<kernel>` | `2.3.2-6.18.18-talos` |
-| `ghcr.io/schwankner/rk3588-npu-device-plugin` | `v<release>` | `v1.12.6-rknpu0.9.10` |
-| `ghcr.io/schwankner/talos-rk3588-npu-installer-base` | `installer-v<talos>` | `installer-v1.12.6` |
+| `ghcr.io/schwankner/rockchip-rknpu` | `<rknpu>-<kernel>` | `0.9.10-6.18.22-talos` |
+| `ghcr.io/schwankner/rockchip-rknn-libs` | `<rknn>-<kernel>` | `2.3.2-6.18.22-talos` |
+| `ghcr.io/schwankner/rk3588-npu-device-plugin` | `v<release>` | `v1.13.0-rc.0-rknpu0.9.10` |
+| `ghcr.io/schwankner/talos-rk3588-npu-installer-base` | `installer-v<talos>` | `installer-v1.13.0-rc.0` |
 
 > **Note:** Extensions are **baked into the installer** as squashfs blobs at build time.
 > They are not pulled from the registry at node boot. Always rebuild the installer after
@@ -251,8 +251,8 @@ Push to `main` with a change to `scripts/common.sh`:
 
 ### Prerequisites
 
-- Talos Linux v1.12.6 on your RK3588 board (via [factory.talos.dev](https://factory.talos.dev) with `sbc-rockchip` overlay)
-- `talosctl` v1.12.6, `kubectl`
+- Talos Linux v1.13.0-rc.0 on your RK3588 board (via [factory.talos.dev](https://factory.talos.dev) with `sbc-rockchip` overlay)
+- `talosctl` v1.13.0-rc.0, `kubectl`
 - Images are public on GHCR; no authentication needed to pull
 
 ### Step 1 — Upgrade to the NPU installer
@@ -264,31 +264,26 @@ The custom installer embeds the kernel whose module-signing key was used to buil
 talosctl upgrade \
   --nodes <NODE_IP> \
   --talosconfig ./your-talosconfig \
-  --image ghcr.io/schwankner/talos-rk3588-npu-installer-base:installer-v1.12.6 \
+  --image ghcr.io/schwankner/talos-rk3588-npu-installer-base:installer-v1.13.0-rc.0 \
   --preserve
 ```
 
-### Step 2 — Add system extensions and CDI to machine config
+### Step 2 — Add system extensions to machine config
 
 ```yaml
 machine:
   install:
     extensions:
-      - image: ghcr.io/schwankner/rockchip-rknpu:0.9.10-6.18.18-talos
-      - image: ghcr.io/schwankner/rockchip-rknn-libs:2.3.2-6.18.18-talos
-
-  files:
-    - path: /etc/cri/conf.d/20-customization.part
-      op: create
-      permissions: 0o644
-      content: |
-        [plugins."io.containerd.cri.v1.runtime"]
-          enable_cdi_devices = true
-          cdi_spec_dirs = ["/var/run/cdi"]
+      - image: ghcr.io/schwankner/rockchip-rknpu:0.9.10-6.18.22-talos
+      - image: ghcr.io/schwankner/rockchip-rknn-libs:2.3.2-6.18.22-talos
 
   sysctls:
     user.max_user_namespaces: "15000"
 ```
+
+> **Note:** No CDI containerd configuration is required. Talos 1.13 enables CDI in
+> containerd by default. The `rockchip-rknpu` extension ships the CDI spec at
+> `/etc/cdi/rockchip-npu.yaml`, which containerd discovers automatically on startup.
 
 Apply and let the node reboot:
 
@@ -396,55 +391,85 @@ No DRM render nodes (`/dev/dri/renderD*`) are involved in this architecture.
 ## 10. Benchmark Results
 
 Tested on **Turing RK1 (RK3588)** in a Kubernetes pod (no `privileged: true`,
-CDI-injected devices, `procMount: Unmasked`).
+CDI-injected devices, `procMount: Unmasked`), Talos v1.13.0-rc.0 / kernel 6.18.22-talos,
+rknpu.ko 0.9.8, librknnrt.so 2.3.2, rknn-toolkit-lite2 2.3.2.
 
-All measurements use `rknn-toolkit-lite2` + `librknnrt.so 2.3.2` via Python.
+### ⚠️ Hardware limitation: only 1 of 3 NPU cores accessible
+
+The RK3588 NPU is documented as 6 TOPS (3 cores × 2 TOPS). On this kernel configuration,
+**only CORE_0 (2 TOPS) is accessible.** CORE_1 and CORE_2 submit commands to hardware
+but never fire an interrupt — the rknpu.ko driver runs in non-IOMMU mode because the
+`npu@fdab0000` Device Tree node lacks the `iommus` property. CORE_1/CORE_2 time out
+after 6 s per inference attempt.
+
+All results below are single-core (CORE_0 / CORE_AUTO). See [Bug 52 in BUGS.md](BUGS.md)
+for root cause, diagnostic table, and the DT fix path.
+
+### Single-thread results
+
 CPU mode = ARM Cortex-A76 fallback path inside `librknnrt.so`.
+Python = `rknnlite.inference()`. C API = direct `rknn_inputs_set` / `rknn_run`.
 
-### Summary table
+| Model | Quant | Runtime | Throughput | Latency | vs CPU |
+|-------|-------|---------|-----------|---------|--------|
+| ResNet18 224×224 | INT8 | CPU (Python) | 136.9 fps | 7.30 ms | baseline |
+| ResNet18 224×224 | INT8 | NPU Python | 130.0 fps | 7.69 ms | 0.95× |
+| ResNet18 224×224 | INT8 | NPU C API | **146.3 fps** | **6.84 ms** | **1.07×** |
+| ResNet50 224×224 | fp16 | CPU (Python) | 24.7 fps | 40.44 ms | baseline |
+| ResNet50 224×224 | fp16 | NPU Python | 29.3 fps | 34.16 ms | 1.19× |
+| YOLOv5s 640×640 | INT8 | CPU (Python) | 21.1 fps | 47.42 ms | baseline |
+| YOLOv5s 640×640 | INT8 | NPU Python | 25.5 fps | 39.15 ms | 1.21× |
+| YOLOv5s 640×640 | INT8 | NPU C API | 21.5 fps | 46.41 ms | 1.02× ¹ |
 
-| Model | Quant | NPU fps | CPU fps | Speedup | Note |
-|-------|-------|---------|---------|---------|------|
-| ResNet18 224×224 | INT8 | 130.0 | 136.9 | **0.95×** | Python overhead dominates at 7ms |
-| ResNet50 224×224 | fp16 | 29.3 | 24.7 | **1.19×** | FP16, no quantization |
-| YOLOv5s 640×640 | INT8 | 25.5 | 21.1 | **1.21×** | ReLU variant, all ops on NPU |
+¹ C API YOLOv5s run used 500 iterations (~23 s); thermal throttling degraded throughput
+  vs the shorter Python run (100 iters, ~4 s).
 
-### Why speedup is modest — Python API overhead
+**NPU hardware compute time** (from `rknn.eval_perf()`, no API or DMA overhead):
 
-The published "10-12× speedup" benchmarks use the **C API** directly. The Python
-`rknnlite.inference()` call has ~3–5 ms per-call overhead (numpy marshaling, DMA
-scheduling, interrupt wait) that is shared by both the NPU and CPU paths. For
-small models like ResNet18 (7–8 ms total), this overhead eliminates the NPU's
-compute advantage in the ratio.
+| Model | Quant | NPU compute only | Theoretical fps |
+|-------|-------|-----------------|-----------------|
+| ResNet18 224×224 | INT8 | 3.68 ms | 272 fps |
+| YOLOv5s 640×640 | INT8 | 18.79 ms | 53 fps |
 
-For YOLOv5s at 39 ms per inference, the API overhead is proportionally smaller
-and the 1.21× NPU lead becomes visible. A C-level benchmark or pipeline mode
-(`rknn_run` with async flag) would recover the expected order-of-magnitude speedup.
+The gap between the hardware compute time and actual throughput (272 → 147 fps for
+ResNet18) is DMA buffer setup and kernel-driver round-trip overhead — not Python API
+overhead. Python `rknnlite` overhead in SDK 2.3.2 is only **~0.5 ms** per call
+(not the 3–5 ms often cited for older SDKs).
 
-> **The key result is not the speedup ratio** — it is that the full stack works
-> end-to-end: `rknpu 0.9.10`, `librknnrt 2.3.2`, CDI device injection,
-> `procMount: Unmasked`, Talos v1.12.6 / kernel 6.18.18, **no `privileged: true`**.
+### Multi-thread C API results (all threads on CORE_0)
 
-### ResNet18 INT8 — 224×224, batch 1 (~1.8 GFLOPS)
+Since only CORE_0 is accessible, multiple threads share one NPU command queue.
+Aggregate throughput saturates at the single-core limit; per-thread latency
+grows linearly. A small aggregate gain (~7%) comes from DMA pipelining.
 
-| Mode | Throughput | Latency | Speedup |
-|------|-----------|---------|---------|
-| NPU (NPU_CORE_AUTO) | 130.0 fps | 7.69 ms | 0.95× |
-| CPU (ARM Cortex-A76) | 136.9 fps | 7.30 ms | 1.0× (baseline) |
+**ResNet18 INT8, 1000 iters/thread:**
 
-### ResNet50 fp16 — 224×224, batch 1 (~8.2 GFLOPS)
+| Threads | Agg. throughput | Per-thread latency | vs single-thread |
+|---------|----------------|--------------------|-----------------|
+| 1       | 146.1 fps       | 6.85 ms            | baseline         |
+| 3       | 156.2 fps       | 19.20 ms (+2.8×)   | +7% aggregate    |
+| 6       | 155.9 fps       | 38.47 ms (+5.6×)   | +7% aggregate    |
 
-| Mode | Throughput | Latency | Speedup |
-|------|-----------|---------|---------|
-| NPU (NPU_CORE_AUTO) | 29.3 fps | 34.16 ms | 1.19× |
-| CPU (ARM Cortex-A76) | 24.7 fps | 40.44 ms | 1.0× (baseline) |
+**YOLOv5s INT8, 200 iters/thread:**
 
-### YOLOv5s INT8 (ReLU) — 640×640, batch 1 (~16 GFLOPS)
+| Threads | Agg. throughput | Per-thread avg latency | vs single-thread |
+|---------|-----------------|------------------------|-----------------|
+| 1       | 21.5 fps        | 46.41 ms               | baseline         |
+| 3       | 38.8 fps        | 68.81 ms (+1.5×)       | +1.8× aggregate  |
 
-| Mode | Throughput | Latency | Speedup |
-|------|-----------|---------|---------|
-| NPU (NPU_CORE_AUTO) | 25.5 fps | 39.15 ms | 1.21× |
-| CPU (ARM Cortex-A76) | 21.1 fps | 47.42 ms | 1.0× (baseline) |
+The 1.8× aggregate gain for YOLOv5s (larger model, longer transfer) is from overlapping
+`rknn_inputs_set` (DMA copy) of one context with `rknn_run` of another — not from
+parallel core execution.
+
+### Key takeaway
+
+> The primary result is not the speedup ratio — it is that the **full stack works
+> end-to-end**: rknpu 0.9.8, librknnrt 2.3.2, CDI device injection, `procMount: Unmasked`,
+> Talos v1.13.0-rc.0 / kernel 6.18.22, **without `privileged: true`**.
+>
+> Once the Device Tree `iommus` property is fixed (see Bug 52), all three NPU cores
+> will be available and multi-context inference should reach ~3× the single-core
+> figures above (~440 fps ResNet18 INT8, ~65 fps YOLOv5s INT8).
 
 ---
 
@@ -459,6 +484,10 @@ See [BUGS.md](BUGS.md) for documented issues and solutions. Selected entries:
 | Bug 45/46 | NPU IOMMU clock gating causes AXI lockup in `init_runtime()` |
 | Bug 47 | `RKNPU_MEM_CREATE` ioctl unimplemented — fixed with `dma_alloc_coherent` |
 | Bug 47 rev 2 | Wrong `obj_addr` returned from `RKNPU_MEM_CREATE` caused silent 3×60 s timeout |
+| Bug 49 | `RKNN_NPU_CORE_AUTO` with concurrent multi-context inference deadlocks rknpu.ko |
+| Bug 50 | BuildKit layer-diff zeroes gcc binaries when large download + compile land in same RUN layer |
+| Bug 51 | Concurrent `rknn_init` from N threads crashes rknpu.ko kernel driver |
+| **Bug 52** | **CORE_1 and CORE_2 inaccessible — rknpu.ko non-IOMMU mode, missing DT `iommus` property; effective NPU: 2 TOPS instead of 6 TOPS** |
 
 ---
 

@@ -8,10 +8,13 @@ dependencies:
   # The pkgs commit for a given Talos release is documented in:
   # https://github.com/siderolabs/talos/blob/<talos-version>/pkg/machinery/gendata/data/pkgs
   #
-  # NOTE: Talos 1.12.x pkgs build the kernel with GCC (toolchain-musl).
-  # Do NOT add LLVM=1 — it causes clang to receive GCC-specific flags
-  # (CONFIG_CC_IS_CLANG=n → -fmin-function-alignment, -fconserve-stack, etc.)
-  # which clang rejects.  Use GCC (the default) to match the kernel build.
+  # NOTE: Talos 1.13.x pkgs build the kernel with Clang/ThinLTO (toolchain-llvm).
+  # LLVM=1 must be passed to make so the OOT module is compiled with clang
+  # and uses the same LLVM IR ABI as the in-tree objects.  Without it, GCC
+  # produces incompatible relocations and module signing fails.
+  # The LLVM_IMAGE dependency (ghcr.io/siderolabs/llvm) provides clang/lld in
+  # PATH so that LLVM=1 can find them.  Mirrors the kernel-prepare dependency.
+  - image: "{{ .LLVM_IMAGE }}:{{ .TOOLS_REV }}"
   - stage: kernel-build
 steps:
   - sources:
@@ -261,11 +264,13 @@ steps:
         # Build rknpu.ko against the Talos kernel source.
         # -C /src: invoke the kernel Makefile (which has the 'modules' target)
         # M=$(pwd): tells the kernel build system where the OOT module lives
-        # No LLVM=1: Talos 1.12.x kernel is GCC-built; use GCC from stage:base.
+        # LLVM=1: Talos 1.13.x kernel is Clang/ThinLTO-built; OOT module must
+        # also use Clang to produce compatible relocations and IR ABI.
         make -j "$(nproc)" \
           -C /src \
           M="$(pwd)" \
           ARCH=arm64 \
+          LLVM=1 \
           modules
     install:
       - |
@@ -283,10 +288,16 @@ steps:
         install -D -m 644 rknpu.ko \
           /rootfs/usr/lib/modules/${KERNEL_RELEASE}/kernel/drivers/rknpu/rknpu.ko
 
-        # udev rule: create /dev/rknpu with world-read/write so unprivileged containers
-        # can access it via CDI injection.
+        # udev rule: create /dev/rknpu and /dev/dma_heap/system with world-read/write
+        # so unprivileged containers can access them via CDI injection.
         install -D -m 644 /pkg/files/90-rknpu.rules \
           /rootfs/usr/lib/udev/rules.d/90-rknpu.rules
+
+        # Static CDI spec: Talos 1.13 enables CDI in containerd by default.
+        # Placing the spec at /etc/cdi/ in the extension squashfs means containerd
+        # discovers it on startup without any machine config patch.
+        install -D -m 644 /pkg/files/rockchip-npu.cdi.yaml \
+          /rootfs/etc/cdi/rockchip-npu.yaml
     test:
       - |
         find /rootfs/usr/lib/modules -name '*.ko' | grep -q '.' || \

@@ -5,15 +5,15 @@
 set -euo pipefail
 
 # Talos Linux
-TALOS_VERSION="${TALOS_VERSION:-v1.12.6}"
+TALOS_VERSION="${TALOS_VERSION:-v1.13.0-rc.0}"
 
 # Linux kernel (must match the Talos release above)
-# Verified on Turing RK1 worker (10.0.60.4): uname -r = 6.18.18-talos
-KERNEL_VERSION="${KERNEL_VERSION:-6.18.18-talos}"
+# Source: https://github.com/siderolabs/talos/blob/v1.13.0-rc.0/pkg/machinery/gendata/data/pkgs
+KERNEL_VERSION="${KERNEL_VERSION:-6.18.22-talos}"
 
 # siderolabs/pkgs commit pinned to the Talos release
-# Source: https://github.com/siderolabs/talos/blob/v1.12.6/pkg/machinery/gendata/data/pkgs
-PKGS_COMMIT="${PKGS_COMMIT:-a92bed5}"
+# Source: https://github.com/siderolabs/talos/blob/v1.13.0-rc.0/pkg/machinery/gendata/data/pkgs
+PKGS_COMMIT="${PKGS_COMMIT:-b121566}"
 
 # Rockchip NPU driver (vendor rknpu, not mainline rocket)
 # Source: https://github.com/w568w/rknpu-module (out-of-tree port to mainline kernel)

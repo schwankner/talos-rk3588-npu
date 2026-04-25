@@ -4,7 +4,6 @@ go 1.23.0
 
 require (
 	google.golang.org/grpc v1.70.0
-	gopkg.in/yaml.v3 v3.0.1
 	k8s.io/kubelet v0.32.0
 )
 

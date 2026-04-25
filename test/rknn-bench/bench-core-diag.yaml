@@ -1,0 +1,106 @@
+---
+# Diagnostic job: test which NPU core masks are accessible via rknnlite
+# Each core mask is tested sequentially: init_runtime, 1 inference, release.
+# This determines whether CORE_1/CORE_2 can be used with explicit core pinning.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: core-diag-script
+  namespace: default
+data:
+  diag.py: |
+    import numpy as np
+    import time
+    from rknnlite.api import RKNNLite
+
+    MODEL = '/model/resnet18.rknn'
+
+    CORES = [
+        ("RKNN_NPU_CORE_AUTO",    0),
+        ("RKNN_NPU_CORE_0",       1),
+        ("RKNN_NPU_CORE_1",       2),
+        ("RKNN_NPU_CORE_2",       4),
+        ("RKNN_NPU_CORE_0_1",     3),
+        ("RKNN_NPU_CORE_0_1_2",   7),
+    ]
+
+    dummy = np.random.randint(0, 256, (1, 224, 224, 3), dtype=np.uint8)
+
+    for name, mask in CORES:
+        print(f"\n=== Testing {name} (mask={mask}) ===", flush=True)
+        rknn = RKNNLite(verbose=False)
+        ret = rknn.load_rknn(MODEL)
+        print(f"  load_rknn ret={ret}", flush=True)
+        if ret != 0:
+            print(f"  SKIP (load failed)", flush=True)
+            rknn.release()
+            continue
+
+        ret = rknn.init_runtime(core_mask=mask)
+        print(f"  init_runtime ret={ret}", flush=True)
+        if ret != 0:
+            print(f"  FAIL: init_runtime returned {ret}", flush=True)
+            rknn.release()
+            continue
+
+        # One warmup inference to confirm the core is actually working
+        try:
+            t0 = time.perf_counter()
+            out = rknn.inference(inputs=[dummy])
+            dt_ms = (time.perf_counter() - t0) * 1000
+            print(f"  inference OK  {dt_ms:.1f} ms", flush=True)
+
+            # 10 timed inferences
+            times = []
+            for _ in range(10):
+                t0 = time.perf_counter()
+                rknn.inference(inputs=[dummy])
+                times.append((time.perf_counter() - t0) * 1000)
+            avg = sum(times) / len(times)
+            print(f"  10-iter avg   {avg:.1f} ms  ({1000/avg:.1f} fps)", flush=True)
+        except Exception as e:
+            print(f"  FAIL: inference exception: {e}", flush=True)
+
+        rknn.release()
+        print(f"  released", flush=True)
+        time.sleep(0.5)
+
+    print("\n=== Diagnostic complete ===", flush=True)
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: rknn-core-diag
+  namespace: default
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      volumes:
+        - name: diag-script
+          configMap:
+            name: core-diag-script
+      containers:
+        - name: bench
+          image: ghcr.io/schwankner/rk3588-rknn-bench:v18
+          imagePullPolicy: Always
+          command: ["python3", "/diag/diag.py"]
+          volumeMounts:
+            - name: diag-script
+              mountPath: /diag
+          env:
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            limits:
+              rockchip.com/npu: "1"
+              cpu: "2"
+              memory: 512Mi
+            requests:
+              cpu: "1"
+              memory: 256Mi

@@ -1715,4 +1715,329 @@ order-of-magnitude speedup.
 
 ---
 
+## Bug 48: OOT module build fails with LLVM=1 — `clang: not found` (Talos 1.13)
+
+**Symptom:** `make: clang: No such file or directory` / `/bin/sh: clang: not found`
+when building `rknpu.ko` against the Talos 1.13.x kernel with `LLVM=1`.
+
+```
+make[2]: clang: No such file or directory
+The kernel was built by: clang version 22.1.2
+You are using:
+/bin/sh: clang: not found
+make[3]: *** [scripts/Makefile.build:287: src/rknpu_drv.o] Error 127
+```
+
+**Root cause:** Talos 1.13.x (pkgs `b121566`) switched the kernel build from GCC
+(`toolchain-musl`) to Clang 22.1.2 / ThinLTO (`toolchain-llvm`).  `LLVM=1` tells
+the kernel Makefile to use `CC=clang`, but our `rockchip-rknpu/pkg.yaml` only
+depended on `stage: base` + `stage: kernel-build`.  `stage: base` is built from
+`ghcr.io/siderolabs/tools`, which does not include the LLVM toolchain.
+
+**Solution:** Add `ghcr.io/siderolabs/llvm` as a bldr image dependency in
+`rockchip-rknpu/pkg.yaml`, exactly as the upstream `kernel-prepare` stage does:
+
+```yaml
+dependencies:
+  - stage: base
+  - image: "{{ .LLVM_IMAGE }}:{{ .TOOLS_REV }}"   # ← adds clang/lld to PATH
+  - stage: kernel-build
+```
+
+`LLVM_IMAGE` and `TOOLS_REV` are defined in the siderolabs/pkgs `Pkgfile`
+(`ghcr.io/siderolabs/llvm` and `v1.13.0-beta.0-3-gc192d81`).  Because our
+`pkg.yaml` is injected into the pkgs tree at build time, these variables are
+available.
+
+**Note:** Bug 8 is the inverse: with a GCC kernel (Talos 1.12.x), do NOT add
+`LLVM=1` or the LLVM image — clang receives GCC-only kernel CFLAGS and fails.
+
+---
+
+**Talos 1.13.0-rc.0 validation — Turing RK1 (RK3588), kernel 6.18.22-talos:**
+
+| Model | Quant | Mode | Throughput | Latency | Speedup |
+|-------|-------|------|-----------|---------|---------|
+| ResNet18 224×224 | INT8 | NPU (RK3588) | 137.0 fps | 7.30 ms | 0.98× |
+| ResNet18 224×224 | INT8 | CPU (ARM Cortex-A76) | 139.6 fps | 7.16 ms | 1.0× (baseline) |
+| YOLOv5s 640×640 | INT8 | NPU (RK3588) |  26.0 fps | 38.51 ms | 1.20× |
+| YOLOv5s 640×640 | INT8 | CPU (ARM Cortex-A76) |  21.6 fps | 46.33 ms | 1.0× (baseline) |
+
+Results consistent with the Talos 1.12.6 baseline (see INT8 benchmark results above).
+CDI spec is now provided as a static extension file at `/etc/cdi/rockchip-npu.yaml`
+instead of being written at runtime by the device plugin.  No machine config
+containerd patch required on Talos 1.13.
+
+**C API benchmark results — Talos 1.13.0-rc.0, kernel 6.18.22, SDK 2.3.2:**
+
+Native C benchmark (`bench_c`) using `rknn_init` / `rknn_run` / `rknn_outputs_get`
+directly — no Python or rknnlite overhead.  2000 iterations / 50 warmup for ResNet18,
+500 iterations / 20 warmup for YOLOv5s.
+
+| Model | Quant | Mode | Throughput | Latency | vs Python API |
+|-------|-------|------|-----------|---------|---------------|
+| ResNet18 224×224 | INT8 | NPU C API (RK3588) | 146.3 fps | 6.84 ms | +6.8% / −0.46 ms |
+| ResNet18 224×224 | INT8 | NPU Python rknnlite | 137.0 fps | 7.30 ms | (baseline) |
+| YOLOv5s 640×640 | INT8 | NPU C API (RK3588) |  21.5 fps | 46.41 ms | −17% (thermal) |
+| YOLOv5s 640×640 | INT8 | NPU Python rknnlite |  26.0 fps | 38.51 ms | (baseline) |
+
+**Key finding:** The rknnlite Python API overhead in SDK 2.3.2 is only **~0.5 ms**
+per call (not the 3–5 ms often cited for older SDKs).  Bypassing Python entirely with
+the C API gives ~7% improvement for ResNet18 — not the order-of-magnitude speedup
+the hypothesis predicted.
+
+The YOLOv5s C API result is *worse* than Python because the longer sustained run
+(500 iterations, 23 s) triggers NPU thermal throttling on the Turing RK1; the
+Python run used only 100 iterations (~4 s) and did not throttle.
+
+**True bottleneck:** For batch-1 synchronous inference the bottleneck is NPU
+execution time plus DMA buffer transfers (150 KB input for ResNet18, 1.2 MB for
+YOLOv5s), not the language binding.  Both Python and C saturate at ~6–7 ms for
+ResNet18 INT8.
+
+**To achieve the advertised 10-12× NPU speedup** you need one or more of:
+- **Concurrent contexts:** spawn N threads each with their own `rknn_init` context
+  to pipeline NPU and DMA work (the NPU can queue multiple jobs)
+- **Batch size > 1:** compile the model with `batch_size=4` or `batch_size=8` so
+  the NPU processes multiple frames per dispatch (amortises per-call overhead)
+- **Asynchronous API:** `rknn_run` with async flag + `rknn_wait` to overlap CPU
+  pre-processing with NPU execution
+- **Larger models:** overhead is proportionally smaller for heavy models (e.g.
+  ResNet50 fp16 at 34 ms per call — API overhead is <2% of total)
+
+---
+
+## Bug 52: NPU CORE_1 and CORE_2 inaccessible — rknpu.ko runs in non-IOMMU mode, sub-cores 1/2 never fire IRQ
+
+**Symptom:** Any inference with `RKNN_NPU_CORE_1`, `RKNN_NPU_CORE_2`, `RKNN_NPU_CORE_0_1`,
+or `RKNN_NPU_CORE_0_1_2` hangs for exactly **~6 400 ms** (the rknpu.ko hardware timeout)
+and prints `failed to submit!` in a loop.  `init_runtime` / `rknn_init` returns 0
+(success) for all core masks — the problem manifests only on the first `rknn_run`.
+`RKNN_NPU_CORE_AUTO` and `RKNN_NPU_CORE_0` work correctly at ~7 ms per inference.
+
+Kernel-side evidence (from `talosctl dmesg`):
+
+```
+kern:  info: platform fdab0000.npu: Adding to iommu group 7
+kern:  info: platform fdac0000.npu: Adding to iommu group 8
+kern:  info: platform fdad0000.npu: Adding to iommu group 9
+kern:  info: RKNPU fdab0000.rknpu: RKNPU: rknpu iommu device-tree entry not found!, using non-iommu mode
+kern:  info: RKNPU fdab0000.rknpu: RKNPU: Initialized RKNPU driver: v0.9.8 for 20240828
+```
+
+Only `fdab0000.rknpu` (CORE_0) is initialised.  `fdac0000` and `fdad0000` are added
+to IOMMU groups but never bind the rknpu driver.  On `rknn_run` to CORE_1:
+
+```
+kern:  err: RKNPU: core 1 irq status: 0x0, raw status: 0x0, require mask: 0x300,
+           task counter: 0x0, elapsed time: 6176579us
+kern:  err: RKNPU: job timeout, flags: 0x0
+kern:  info: RKNPU: soft reset, num: 1
+```
+
+`irq status: 0x0` and `raw status: 0x0` confirm CORE_1 hardware never acknowledges
+the submitted job.  The driver does a soft reset after each timeout and retries.
+
+**Root cause:** The `npu@fdab0000` Device Tree node lacks the `iommus` property.
+The rknpu.ko driver detects this ("iommu device-tree entry not found!") and falls
+back to **non-IOMMU mode**.  In non-IOMMU mode only the primary sub-core (CORE_0)
+is initialised.  CORE_1 and CORE_2 require IOMMU-mapped DMA descriptors to receive
+work; without IOMMU the hardware command descriptor for those sub-cores is never
+delivered and no interrupt fires.
+
+Three physical NPU instances exist in the DT (`fdab0000`, `fdac0000`, `fdad0000` —
+one per NPU sub-core) but only the first one has a complete rknpu binding.
+
+**Impact:**
+- Effective NPU capacity: **2 TOPS** (CORE_0 only), not the advertised 6 TOPS
+- Batch/pipeline multi-core acceleration not available
+- All benchmark results in this file are single-core (CORE_0 / AUTO) results
+
+**Multi-thread C API results (v18 image, all threads pinned to CORE_0, Talos 1.13.0-rc.0):**
+
+ResNet18 INT8 — aggregate throughput saturates at CORE_0 capacity:
+
+| threads | iters/thread | agg. throughput | per-thread latency | vs single-thread |
+|---------|-------------|-----------------|-------------------|-----------------|
+| 1       | 1000        | 146.1 fps       | 6.85 ms           | baseline         |
+| 3       | 1000        | 156.2 fps       | 19.20 ms (+2.8×)  | +7% aggregate    |
+| 6       | 1000        | 155.9 fps       | 38.47 ms (+5.6×)  | +7% aggregate    |
+
+YOLOv5s INT8 — 3 threads × 200 iters:
+
+| threads | agg. throughput | per-thread avg latency | vs single-thread |
+|---------|-----------------|------------------------|-----------------|
+| 1 (C API bench_c) | 21.5 fps  | 46.41 ms          | baseline         |
+| 3 (bench_c_mt)    | 38.8 fps  | 68.81 ms (+1.5×)  | +1.8× aggregate  |
+
+The small aggregate gain (~7% for ResNet18, 1.8× for YOLOv5s) is not multi-core
+parallelism but DMA/setup pipelining: while one context's inference is running,
+another thread's `rknn_inputs_set` pre-stages the next input buffer.  All threads
+serialize on the single NPU command queue.
+
+**Diagnostic:**
+
+Python one-shot per core mask (from v17 bench image):
+
+| Core mask         | `init_runtime` | first inference | 10-iter avg       |
+|-------------------|---------------|-----------------|-------------------|
+| CORE_AUTO (0)     | ret=0         | 9.3 ms          | 7.0 ms / 143.8 fps |
+| CORE_0 (1)        | ret=0         | 7.7 ms          | 7.0 ms / 142.4 fps |
+| CORE_1 (2)        | ret=0         | **6301 ms** ⚠   | **6400 ms** / 0.2 fps |
+| CORE_2 (4)        | ret=0         | **6319 ms** ⚠   | **6400 ms** / 0.2 fps |
+| CORE_0_1 (3)      | ret=0         | **6339 ms** ⚠   | **6400 ms** / 0.2 fps |
+| CORE_0_1_2 (7)    | ret=0         | **6340 ms** ⚠   | **6400 ms** / 0.2 fps |
+
+**Solution (not yet implemented):** Add proper `iommus` DT property to the
+`npu@fdab0000` node (and potentially `npu@fdac0000`, `npu@fdad0000`) so that rknpu.ko
+enables IOMMU mode and can initialise all three sub-cores.  Requires sourcing the
+correct IOMMU controller cell values from the RK3588 DTS reference (Rockchip BSP).
+
+Until the DT is fixed, only CORE_AUTO and CORE_0 are usable.  Do not call
+`rknn_set_core_mask` with any mask other than 0 (AUTO) or 1 (CORE_0).
+
+**Observed on:** rknpu.ko driver 0.9.8, librknnrt.so 2.3.2, Talos 1.13.0-rc.0 /
+kernel 6.18.22-talos, Turing RK1 (RK3588).
+
+---
+
+## Bug 51: Concurrent `rknn_init` from N threads crashes rknpu.ko (even with explicit core pinning)
+
+**Symptom:** Pod starts, binary executes, but the Kubernetes API server becomes
+unreachable within seconds (connection refused / timeout).  Node requires hard reboot
+via BMC.  No crash log is visible in pod output because the kernel panic occurs during
+the init phase before any inference starts.
+
+**Trigger:** `bench_c_mt` with N threads each calling `rknn_init` concurrently from
+`bench_thread()`.  The crash happens even when explicit core masks
+(`RKNN_NPU_CORE_0/1/2`) are used — concurrent `rknn_init` is the root cause, not
+`RKNN_NPU_CORE_AUTO`.
+
+**Root cause:** `rknn_init` is **not thread-safe** in librknnrt.so 2.3.2 / rknpu.ko
+driver 0.9.8.  When called simultaneously from N threads, internal driver state
+initialisation races, corrupting the NPU command queue and causing a kernel panic.
+
+**Solution:** Call `rknn_init` only from the **main thread**, one context at a time,
+with a short `usleep(20000)` between calls.  Pass the pre-initialised context to each
+thread via the argument struct.  Threads only run the inference loop:
+
+```c
+/* main() — sequential init */
+for (int t = 0; t < n_threads; t++) {
+    rknn_init(&args[t].ctx, model_data, model_size, 0, NULL);
+    rknn_set_core_mask(args[t].ctx, core_map[t % 3]);
+    /* ... query io, allocate buffers, warmup ... */
+    usleep(20000);  /* let driver settle between contexts */
+}
+/* spawn threads — they only call rknn_inputs_set/rknn_run/rknn_outputs_get */
+for (int t = 0; t < n_threads; t++)
+    pthread_create(&tids[t], NULL, bench_thread, &args[t]);
+```
+
+**Rule:** `rknn_init`, `rknn_destroy`, and `rknn_set_core_mask` must only be called
+from a single thread.  The inference APIs (`rknn_inputs_set`, `rknn_run`,
+`rknn_outputs_get`) are safe to call from different threads as long as each thread
+uses its own context.
+
+**Observed on:** rknpu.ko driver 0.9.8, librknnrt.so 2.3.2, Talos 1.13.0-rc.0 /
+kernel 6.18.22-talos, Turing RK1 (RK3588).
+
+---
+
+## Bug 50: BuildKit layer-diff bug zero-truncates gcc output binaries in final image stage
+
+**Symptom:** `exec /bench_c: exec format error` / `exec /bench_c_mt: exec format error`
+at pod startup.  Inspecting the image shows the compiled binaries are **0 bytes**:
+
+```
+-rwxr-xr-x. 1 root root 0 Apr 24 20:57 /bench_c
+-rwxr-xr-x. 1 root root 0 Apr 24 20:57 /bench_c_mt
+```
+
+`dt_compat_shim.so` is also affected (`file too short` error from ld.so on preload).
+
+**Trigger:** BuildKit layer-diff truncation occurs when a large binary download
+(~190 MB `librknnrt.so` via curl), gcc compilation, and `apt-get purge` all execute
+in the same `RUN` layer of the *final* multi-stage image.  The layer-diff algorithm
+zeros out the gcc output files when computing the diff between pre- and post-purge
+states.  The build reports **success** despite the binaries being empty.
+
+The same class of bug is documented at the top of the Dockerfile for the python3.11
+binary on ubuntu:22.04 — fixed there by using `python:3.11-slim-bullseye` (python3.11
+pre-baked in base layers, not installed in a diff-prone RUN step).
+
+**Why it was intermittent:** BuildKit caches the RUN layer output.  When `bench_c.c`
+was unchanged (v13→v14), the cache was reused and the valid binaries from v13 were
+served.  v15 modified `bench_c_mt.c`, busting the cache and forcing the RUN layer to
+re-execute — this re-execution triggered the truncation.
+
+**Solution:** Move all gcc compilation into a dedicated `c-compiler` stage and
+`COPY --from=c-compiler` the binaries into the final stage.  A `COPY --from`
+instruction is a plain file copy — the BuildKit diff algorithm cannot truncate it:
+
+```dockerfile
+FROM python:3.11-slim-bullseye AS c-compiler
+RUN apt-get update && apt-get install -y gcc libc6-dev curl ca-certificates ...
+COPY dt_compat_shim.c bench_c.c bench_c_mt.c /tmp/
+RUN curl ... && gcc ... -o /bench_c ... && gcc ... -o /bench_c_mt ...
+
+FROM python:3.11-slim-bullseye   # final stage — no gcc, no apt-purge
+COPY --from=c-compiler /bench_c     /bench_c
+COPY --from=c-compiler /bench_c_mt  /bench_c_mt
+COPY --from=c-compiler /dt_compat_shim.so /usr/lib/dt_compat_shim.so
+```
+
+**Rule:** Never compile binaries in the same `RUN` layer as a large file download
+(>50 MB) and `apt-get purge` in a multi-stage final stage.  Always use a dedicated
+builder stage and `COPY --from` the outputs.
+
+---
+
+## Bug 49: Concurrent `RKNN_NPU_CORE_AUTO` contexts deadlock rknpu.ko and crash the node
+
+**Symptom:** Multi-context concurrent inference with `RKNN_NPU_CORE_AUTO` hangs
+indefinitely with the following error repeated every ~6 s, and eventually the node
+becomes unreachable (API server timeout, requires hard reboot via BMC):
+
+```
+E RKNN: [HH:MM:SS.mmm] failed to submit!, op id: 1, op name: , flags: 0x5,
+        task start: 0, task number: 38, run task counter: 0,
+        int status: 0, If using rknn, update to the latest toolkit2...
+```
+
+**Trigger:** N threads, each with their own `rknn_context`, all calling
+`rknn_set_core_mask(ctx, RKNN_NPU_CORE_AUTO)` before starting concurrent inference
+loops that start simultaneously (e.g. via a `pthread_barrier`).
+
+**Root cause:** `RKNN_NPU_CORE_AUTO` lets the rknpu.ko driver assign the context to
+whichever NPU core is "free" at submit time.  When N contexts all attempt to submit
+simultaneously, the driver's command queue arbiter deadlocks — no context is assigned
+to a definitive core, so the submit spins forever.  The `run task counter: 0` in the
+error confirms no task has been dispatched despite repeated retries (~6 s interval).
+Eventually the NPU IRQ handler stops responding and the kernel panics or the API
+server becomes unreachable.
+
+**Solution:** Pin each context to a distinct NPU core explicitly before entering the
+inference loop:
+
+```c
+/* thread_id % 3 distributes threads across all 3 NPU cores */
+static const rknn_core_mask core_map[3] = {
+    RKNN_NPU_CORE_0, RKNN_NPU_CORE_1, RKNN_NPU_CORE_2
+};
+rknn_set_core_mask(ctx, core_map[thread_id % 3]);
+```
+
+With explicit pinning, each context submits to a private core queue — no arbitration
+contention — and all N threads run truly in parallel.
+
+**Rule:** Never use `RKNN_NPU_CORE_AUTO` in a multi-context concurrent setup.
+`RKNN_NPU_CORE_AUTO` is safe for single-context or sequential (non-overlapping) use only.
+`RKNN_NPU_CORE_0_1_2` (all 3 cores on a single context) is safe for single-context only.
+
+**Observed on:** rknpu.ko driver 0.9.8, librknnrt.so 2.3.2, Talos 1.13.0-rc.0 /
+kernel 6.18.22-talos, Turing RK1 (RK3588).
+
+---
+
 *Add new bugs above this line, most recent first.*

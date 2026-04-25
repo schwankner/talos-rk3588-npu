@@ -13,7 +13,6 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
-	"gopkg.in/yaml.v3"
 	v1beta1 "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
 )
 
@@ -27,50 +26,15 @@ const (
 	// BSP ioctl numbers (type='r'). There are no DRM render nodes in this mode.
 	rknpuMiscDev = "/dev/rknpu"
 
-	// librknnrt.so is installed by the rockchip-rknn-libs Talos extension.
-	librknnrt = "/usr/lib/librknnrt.so"
-
-	cdiKind      = "rockchip.com/npu"
+	// CDI device reference — containerd looks up this name in the CDI spec
+	// installed by the rockchip-rknpu system extension at /etc/cdi/rockchip-npu.yaml.
 	cdiDeviceRef = "rockchip.com/npu=0"
-	cdiSpecDir   = "/var/run/cdi"
-	cdiSpecFile  = "/var/run/cdi/rockchip-npu.yaml"
 
 	kubeletSock = "/var/lib/kubelet/device-plugins/kubelet.sock"
 	pluginSock  = "/var/lib/kubelet/device-plugins/rk3588-npu.sock"
 
 	pollInterval = 10 * time.Second
 )
-
-// ---------------------------------------------------------------------------
-// CDI spec structures (CDI spec v0.6.0)
-// ---------------------------------------------------------------------------
-
-type cdiSpec struct {
-	CDIVersion string      `yaml:"cdiVersion"`
-	Kind       string      `yaml:"kind"`
-	Devices    []cdiDevice `yaml:"devices"`
-}
-
-type cdiDevice struct {
-	Name           string        `yaml:"name"`
-	ContainerEdits containerEdit `yaml:"containerEdits"`
-}
-
-type containerEdit struct {
-	DeviceNodes []deviceNode `yaml:"deviceNodes,omitempty"`
-	Mounts      []mount      `yaml:"mounts,omitempty"`
-}
-
-type deviceNode struct {
-	Path        string `yaml:"path"`
-	Permissions string `yaml:"permissions,omitempty"`
-}
-
-type mount struct {
-	HostPath      string   `yaml:"hostPath"`
-	ContainerPath string   `yaml:"containerPath"`
-	Options       []string `yaml:"options,omitempty"`
-}
 
 // ---------------------------------------------------------------------------
 // NPU device discovery (DMA_HEAP mode)
@@ -83,57 +47,6 @@ func discoverNPU() error {
 	if _, err := os.Stat(rknpuMiscDev); err != nil {
 		return fmt.Errorf("%s not found: %w — is rknpu.ko loaded?", rknpuMiscDev, err)
 	}
-	return nil
-}
-
-// ---------------------------------------------------------------------------
-// CDI spec management
-// ---------------------------------------------------------------------------
-
-func writeCDISpec() error {
-	if err := os.MkdirAll(cdiSpecDir, 0755); err != nil {
-		return fmt.Errorf("create cdi dir: %w", err)
-	}
-
-	edits := containerEdit{}
-
-	// BSP misc device — librknnrt.so v2.3.x opens /dev/rknpu and uses BSP
-	// ioctl numbers (type='r') to submit inference jobs.
-	edits.DeviceNodes = append(edits.DeviceNodes,
-		deviceNode{Path: rknpuMiscDev, Permissions: "rw"},
-	)
-
-	// dma_heap is intentionally omitted from CDI deviceNodes.
-	// CDI creates device nodes via mknod (not bind-mount), which produces mode
-	// 0600 owned by uid 65534 (host uid 0 is unmapped in user namespaces) —
-	// that blocks O_RDWR. Instead, dma_heap is exposed via the kubelet DeviceSpec
-	// in Allocate(), which bind-mounts from the host and preserves the 0666 mode.
-
-	// librknnrt.so — installed by rockchip-rknn-libs Talos extension.
-	// Bind-mount into the container so the application does not need to bundle it.
-	if _, err := os.Stat(librknnrt); err == nil {
-		edits.Mounts = append(edits.Mounts, mount{
-			HostPath:      librknnrt,
-			ContainerPath: librknnrt,
-			Options:       []string{"ro", "bind"},
-		})
-	}
-
-	spec := cdiSpec{
-		CDIVersion: "0.6.0",
-		Kind:       cdiKind,
-		Devices:    []cdiDevice{{Name: "0", ContainerEdits: edits}},
-	}
-
-	data, err := yaml.Marshal(&spec)
-	if err != nil {
-		return fmt.Errorf("marshal cdi spec: %w", err)
-	}
-	if err := os.WriteFile(cdiSpecFile, data, 0644); err != nil {
-		return fmt.Errorf("write cdi spec: %w", err)
-	}
-
-	log.Printf("CDI spec written to %s", cdiSpecFile)
 	return nil
 }
 
@@ -170,10 +83,7 @@ func (p *npuPlugin) ListAndWatch(_ *v1beta1.Empty, stream v1beta1.DevicePlugin_L
 			log.Printf("ListAndWatch: device unavailable (%d/%d): %v", failCount, unhealthyThreshold, err)
 		} else {
 			if failCount > 0 {
-				log.Printf("ListAndWatch: device recovered, rewriting CDI spec")
-				if wErr := writeCDISpec(); wErr != nil {
-					log.Printf("ListAndWatch: CDI spec update failed: %v", wErr)
-				}
+				log.Printf("ListAndWatch: device recovered")
 			}
 			failCount = 0
 		}
@@ -202,28 +112,26 @@ func (p *npuPlugin) Allocate(_ context.Context, req *v1beta1.AllocateRequest) (*
 	resp := &v1beta1.AllocateResponse{}
 	for range req.ContainerRequests {
 		cr := &v1beta1.ContainerAllocateResponse{
-			// CDI path: containerd reads /var/run/cdi/rockchip-npu.yaml and
-			// injects /dev/rknpu and the librknnrt.so bind-mount.
+			// CDI path: containerd resolves "rockchip.com/npu=0" against the spec
+			// installed by the rockchip-rknpu system extension at
+			// /etc/cdi/rockchip-npu.yaml, injecting /dev/rknpu, /dev/dma_heap/system,
+			// and the librknnrt.so bind-mount automatically.
 			CDIDevices: []*v1beta1.CDIDevice{{Name: cdiDeviceRef}},
-			// DeviceSpec: kubelet uses this to bind-mount device nodes into the
-			// container and add them to the cgroupv2 device eBPF allowlist.
+			// DeviceSpec: kubelet uses this to add device nodes to the cgroupv2
+			// device eBPF allowlist. CDI handles bind-mounts and permissions;
+			// DeviceSpec ensures the kernel cgroup allowlist is updated too.
 			Devices: []*v1beta1.DeviceSpec{
 				{
 					HostPath:      rknpuMiscDev,
 					ContainerPath: rknpuMiscDev,
 					Permissions:   "rw",
 				},
+				{
+					HostPath:      "/dev/dma_heap/system",
+					ContainerPath: "/dev/dma_heap/system",
+					Permissions:   "rw",
+				},
 			},
-		}
-		// dma_heap: librknnrt.so uses dma_buf for zero-copy CPU<->NPU transfers.
-		// Include it in DeviceSpec (not just CDI) so kubelet handles the cgroup
-		// device allowlist — CDI alone leaves the file mode wrong (mknod vs bind).
-		if _, err := os.Stat("/dev/dma_heap/system"); err == nil {
-			cr.Devices = append(cr.Devices, &v1beta1.DeviceSpec{
-				HostPath:      "/dev/dma_heap/system",
-				ContainerPath: "/dev/dma_heap/system",
-				Permissions:   "rw",
-			})
 		}
 		resp.ContainerResponses = append(resp.ContainerResponses, cr)
 	}
@@ -320,18 +228,9 @@ func main() {
 	}
 	log.Printf("Discovered NPU: %s", rknpuMiscDev)
 
-	// The kernel creates /dev/dma_heap/system with mode 0600. The udev rule in
-	// the rockchip-rknpu extension overrides this to 0666, but until the rule
-	// fires we ensure it here. Running as uid 0 so no CAP_FOWNER needed.
-	if err := os.Chmod("/dev/dma_heap/system", 0o666); err != nil {
-		log.Printf("Warning: chmod /dev/dma_heap/system: %v (device may be inaccessible in user-namespace pods)", err)
-	} else {
-		log.Println("chmod 0666 /dev/dma_heap/system")
-	}
-
-	if err := writeCDISpec(); err != nil {
-		log.Fatalf("Failed to write CDI spec: %v", err)
-	}
+	// CDI spec is provided as a static file by the rockchip-rknpu system extension
+	// at /etc/cdi/rockchip-npu.yaml. Talos 1.13 enables CDI in containerd by
+	// default; no runtime spec-writing or machine config patch is needed.
 
 	plugin := &npuPlugin{}
 

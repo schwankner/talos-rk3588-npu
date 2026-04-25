@@ -1,12 +1,13 @@
 ---
-# RKNN CPU baseline benchmark Job — ResNet18 INT8
-# Runs the same INT8 model on ARM CPU cores (no NPU) for comparison.
-# librknnrt.so still requires /dev/rknpu to init — CDI injects it via
-# rockchip.com/npu: "1"; --mode cpu calls init_runtime() without core_mask.
+# RKNN C API multi-thread benchmark — ResNet18 INT8, 6 threads
+# 6 concurrent rknn_context threads = 2 per RK3588 NPU core.
+# Threads pinned: 0,3→CORE_0  1,4→CORE_1  2,5→CORE_2.
+# Tests whether 2 queued jobs per core increases throughput vs 3 threads.
+# Expected: close to 3-thread result (NPU is the bottleneck, not thread count).
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: rknn-bench-cpu
+  name: rknn-bench-npu-c-mt-resnet18-t6
   namespace: default
 spec:
   backoffLimit: 0
@@ -17,7 +18,7 @@ spec:
         - name: bench
           image: ghcr.io/schwankner/rk3588-rknn-bench:v18
           imagePullPolicy: Always
-          args: ["--mode", "cpu", "--model", "resnet18", "--iterations", "30"]
+          command: ["/bench_c_mt", "/model/resnet18.rknn", "resnet18", "6", "1000", "50"]
           env:
             - name: PYTHONUNBUFFERED
               value: "1"
@@ -28,9 +29,8 @@ spec:
           resources:
             limits:
               rockchip.com/npu: "1"
-              cpu: "4"
-              memory: 512Mi
+              cpu: "6"
+              memory: 768Mi
             requests:
-              rockchip.com/npu: "1"
-              cpu: "2"
-              memory: 256Mi
+              cpu: "3"
+              memory: 384Mi
