@@ -10,6 +10,9 @@ jobs:
   check:
     name: Check Talos release
     runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
 
     steps:
       - name: Checkout
@@ -38,8 +41,12 @@ jobs:
           CURRENT="${{ steps.current.outputs.version }}"
           LATEST="${{ steps.latest.outputs.version }}"
 
-          if [ "${CURRENT}" = "${LATEST}" ]; then
-            echo "Up to date: ${CURRENT}"
+          # Use sort -V so that a pre-release current (e.g. v1.13.0-rc.0) that
+          # is *ahead* of the latest stable release does not trigger a false
+          # positive "update needed".
+          NEWER=$(printf '%s\n%s\n' "${CURRENT#v}" "${LATEST#v}" | sort -V | tail -1)
+          if [ "${CURRENT}" = "${LATEST}" ] || [ "v${NEWER}" != "${LATEST}" ]; then
+            echo "Up to date or ahead: ${CURRENT} (latest stable: ${LATEST})"
             echo "update_needed=false" >> "$GITHUB_OUTPUT"
           else
             echo "Update available: ${CURRENT} → ${LATEST}"
