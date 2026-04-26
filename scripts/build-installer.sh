@@ -329,6 +329,7 @@ NEW_NODE = (
     '\t\treset-names = "srst_a";\n'
     '\t\tpower-domains = <0x22 0x09 0x22 0x0a 0x22 0x0b>;\n'
     '\t\tpower-domain-names = "nputop", "npu1", "npu2";\n'
+    '\t\tiommus = <0x66 0x67 0x68>;\n'
     '\t\tnpu-supply = <0x36>;\n'
     '\t\tsram-supply = <0x36>;\n'
     '\t\tstatus = "okay";\n'
@@ -336,7 +337,7 @@ NEW_NODE = (
 )
 
 
-def process_node(dts, node_name, disable=False, rename_compat=None, insert_after=None):
+def process_node(dts, node_name, disable=False, rename_compat=None, insert_after=None, strip_props=None):
     lines = dts.split('\n')
     result = []
     in_node = False
@@ -353,6 +354,10 @@ def process_node(dts, node_name, disable=False, rename_compat=None, insert_after
                 result.append(line)
         else:
             depth += line.count('{') - line.count('}')
+            if strip_props and depth >= 1:
+                prop_name = line.lstrip('\t').split('=')[0].rstrip()
+                if any(prop_name == p for p in strip_props):
+                    continue
             if disable and 'status = "okay"' in line:
                 line = line.replace('status = "okay"', 'status = "disabled"')
             if rename_compat and 'compatible = "rockchip,rk3588-rknn-core"' in line:
@@ -378,13 +383,14 @@ if __name__ == '__main__':
     # string keeps the nodes as enumerated platform devices and PM domain
     # consumers, matching the vanilla DTB's accounting.
     for addr in ['npu@fdab0000', 'npu@fdac0000', 'npu@fdad0000']:
-        dts = process_node(dts, addr, rename_compat='rockchip,rk3588-rknn-core-noop')
+        dts = process_node(dts, addr, rename_compat='rockchip,rk3588-rknn-core-noop',
+                           strip_props=['iommus'])
 
     # Insert the vendor rknpu node after the last NPU IOMMU node.  The IOMMU
     # nodes are left enabled so they remain PM domain consumers and genpd
-    # sync_state() accounting is undisturbed vs the vanilla DTB.  The NEW_NODE
-    # intentionally omits the iommus property so rknpu always operates in
-    # non-iommu mode and does not attempt to use the IOMMU framework.
+    # sync_state() accounting is undisturbed vs the vanilla DTB.  The rknpu
+    # node gets iommus = <0x66 0x67 0x68> so rknpu.ko operates in IOMMU mode
+    # and all three sub-cores (CORE_0/1/2) are accessible (Bug 52 fix).
     dts = process_node(dts, 'iommu@fdad9000', insert_after=NEW_NODE)
 
     sys.stdout.write(dts)

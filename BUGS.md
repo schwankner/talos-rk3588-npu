@@ -1888,13 +1888,19 @@ Python one-shot per core mask (from v17 bench image):
 | CORE_0_1 (3)      | ret=0         | **6339 ms** ⚠   | **6400 ms** / 0.2 fps |
 | CORE_0_1_2 (7)    | ret=0         | **6340 ms** ⚠   | **6400 ms** / 0.2 fps |
 
-**Solution (not yet implemented):** Add proper `iommus` DT property to the
-`npu@fdab0000` node (and potentially `npu@fdac0000`, `npu@fdad0000`) so that rknpu.ko
-enables IOMMU mode and can initialise all three sub-cores.  Requires sourcing the
-correct IOMMU controller cell values from the RK3588 DTS reference (Rockchip BSP).
+**Fix (implemented):** The Python DTB patcher in `scripts/build-installer.sh` was
+updated to:
+1. Strip the `iommus` property from the `npu@fdab/fdac/fdad0000` noop nodes so the
+   IOMMU hardware is not claimed by unbound platform devices.
+2. Add `iommus = <0x66 0x67 0x68>` (phandles for fdab9000/fdac9000/fdad9000.iommu)
+   to the `rknpu@fdab0000` node, enabling IOMMU mode in rknpu.ko.
 
-Until the DT is fixed, only CORE_AUTO and CORE_0 are usable.  Do not call
-`rknn_set_core_mask` with any mask other than 0 (AUTO) or 1 (CORE_0).
+The Bug 45 driver patch in `rockchip-rknpu/pkg.yaml` was extended (Bug 52) to loop
+over all three IOMMU phandle indices (0..2) and call `pm_runtime_get_sync +
+pm_runtime_get_noresume` on each, keeping all three IOMMU clocks permanently enabled.
+
+**Expected result after node upgrade:** `CORE_1` and `CORE_2` accessible; effective
+NPU capacity ~6 TOPS (all three sub-cores); multi-thread throughput ~3× higher.
 
 **Observed on:** rknpu.ko driver 0.9.8, librknnrt.so 2.3.2, Talos 1.13.0-rc.0 /
 kernel 6.18.22-talos, Turing RK1 (RK3588).

@@ -13,7 +13,7 @@
 //   compatible = "rockchip,rk3588-rknpu"       (single unified node)
 //
 // This overlay:
-//   1. Disables the per-core rknn_core_* and rknn_mmu_* nodes.
+//   1. Disables the per-core rknn_core_* nodes; keeps rknn_mmu_* enabled (Bug 16/52).
 //   2. Inserts a single rknpu node at fdab0000 covering all three cores.
 //
 // Integration (Talos machine config):
@@ -50,9 +50,9 @@
 &rknn_core_0 { status = "disabled"; };
 &rknn_core_1 { status = "disabled"; };
 &rknn_core_2 { status = "disabled"; };
-&rknn_mmu_0  { status = "disabled"; };
-&rknn_mmu_1  { status = "disabled"; };
-&rknn_mmu_2  { status = "disabled"; };
+/* rknn_mmu_0/1/2 intentionally kept enabled: they must remain as PM domain
+ * consumers so genpd sync_state() accounting matches the vanilla DTB (Bug 16).
+ * The rknpu node references them via iommus phandles below. */
 
 /* -----------------------------------------------------------------------
  * 2. Vendor rknpu node — single unified device, three register ranges
@@ -95,10 +95,8 @@
 		                <&power RK3588_PD_NPU2>;
 		power-domain-names = "nputop", "npu1", "npu2";
 
-		/* Re-use the same IOMMU hardware units (they remain in base DTB
-		 * as rknn_mmu_0/1/2; the phandle still resolves even though
-		 * the rknn_mmu nodes are disabled — the IOMMU driver binds to
-		 * the physical register range regardless of DT status). */
+		/* IOMMU controllers for each sub-core — kept enabled in DT so
+		 * PM domain consumer accounting is undisturbed (Bug 16/52). */
 		iommus = <&rknn_mmu_0>, <&rknn_mmu_1>, <&rknn_mmu_2>;
 
 		operating-points-v2 = <&npu_opp_table>;
