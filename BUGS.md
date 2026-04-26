@@ -1899,8 +1899,25 @@ The Bug 45 driver patch in `rockchip-rknpu/pkg.yaml` was extended (Bug 52) to lo
 over all three IOMMU phandle indices (0..2) and call `pm_runtime_get_sync +
 pm_runtime_get_noresume` on each, keeping all three IOMMU clocks permanently enabled.
 
-**Expected result after node upgrade:** `CORE_1` and `CORE_2` accessible; effective
-NPU capacity ~6 TOPS (all three sub-cores); multi-thread throughput ~3× higher.
+**Verified result (2026-04-26):**
+
+| Core mask | init_runtime | First infer | 10-iter avg | Throughput |
+|---|---|---|---|---|
+| CORE_AUTO (0) | ret=0 | 9.9 ms | 7.0 ms | 143.8 fps |
+| CORE_0 (1)    | ret=0 | 7.7 ms | 7.0 ms | 142.2 fps |
+| CORE_1 (2)    | ret=0 | 7.9 ms | 7.2 ms | 138.4 fps ✅ |
+| CORE_2 (4)    | ret=0 | 7.8 ms | 7.3 ms | 136.9 fps ✅ |
+| CORE_0_1 (3)  | ret=0 | 6.6 ms | 6.9 ms | 144.5 fps |
+| CORE_0_1_2 (7)| ret=0 | 5.7 ms | 5.6 ms | 179.6 fps ✅ |
+
+All 3 cores fire inference at ~7 ms. Full 3-core mode reaches 179.6 fps (vs 0.2 fps
+before the fix). Kernel dmesg confirms IOMMU mode and all three IOMMUs held active:
+```
+rknpu iommu is enabled, using iommu mode
+Bug 52: iommu[0] held active
+Bug 52: iommu[1] held active
+Bug 52: iommu[2] held active
+```
 
 **Observed on:** rknpu.ko driver 0.9.8, librknnrt.so 2.3.2, Talos 1.13.0-rc.0 /
 kernel 6.18.22-talos, Turing RK1 (RK3588).
