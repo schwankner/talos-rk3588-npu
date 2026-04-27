@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	v1beta1 "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
@@ -41,8 +42,39 @@ const (
 	kubeletSock = "/var/lib/kubelet/device-plugins/kubelet.sock"
 	pluginSock  = "/var/lib/kubelet/device-plugins/rk3588-npu.sock"
 
+	// cdiSpecDest is the path where the CDI spec is written at startup.
+	// Talos containerd is configured with cdi_spec_dirs = ['/run/cdi'] only;
+	// the system extension installs the spec at /etc/cdi/ (persistent) but
+	// containerd does not watch that path.  The device plugin copies the spec
+	// to /var/run/cdi/ (= /run/cdi/) on every start so it survives reboots.
+	cdiSpecSrc  = "/etc/cdi/rockchip-npu.yaml"
+	cdiSpecDest = "/var/run/cdi/rockchip-npu.yaml"
+
 	pollInterval = 10 * time.Second
 )
+
+// ---------------------------------------------------------------------------
+// CDI spec management
+// ---------------------------------------------------------------------------
+
+// writeCDISpec copies the CDI spec from the system extension path (/etc/cdi/)
+// to the containerd CDI watch directory (/var/run/cdi/).  Talos containerd is
+// configured with cdi_spec_dirs = ['/run/cdi']; the extension installs the
+// spec under /etc/cdi/ which is persistent but not watched.  This copy must
+// be performed on every start because /run/cdi is a tmpfs cleared on reboot.
+func writeCDISpec() error {
+	data, err := os.ReadFile(cdiSpecSrc)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", cdiSpecSrc, err)
+	}
+	if err := os.MkdirAll(filepath.Dir(cdiSpecDest), 0o755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", filepath.Dir(cdiSpecDest), err)
+	}
+	if err := os.WriteFile(cdiSpecDest, data, 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", cdiSpecDest, err)
+	}
+	return nil
+}
 
 // ---------------------------------------------------------------------------
 // NPU device discovery (DMA_HEAP mode)
@@ -251,9 +283,12 @@ func main() {
 	}
 	log.Printf("Discovered NPU: %s — advertising %d virtual slots", rknpuMiscDev, npuCores)
 
-	// CDI spec is provided as a static file by the rockchip-rknpu system extension
-	// at /etc/cdi/rockchip-npu.yaml. Talos 1.13 enables CDI in containerd by
-	// default; no runtime spec-writing or machine config patch is needed.
+	// Copy CDI spec from /etc/cdi/ (extension-installed, persistent) to
+	// /var/run/cdi/ (containerd watch dir, tmpfs cleared on reboot).
+	if err := writeCDISpec(); err != nil {
+		log.Fatalf("Failed to write CDI spec: %v", err)
+	}
+	log.Printf("CDI spec written to %s", cdiSpecDest)
 
 	plugin := &npuPlugin{}
 
