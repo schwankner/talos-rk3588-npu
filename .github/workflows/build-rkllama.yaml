@@ -4,26 +4,22 @@ name: Build RKLLama
 # GHCR namespace.  Triggered manually or when the upstream rkllama source
 # commit we pin changes.
 #
-# The official ghcr.io/notpunchnox/rkllama:main image has a broken ARM64
-# build since 2026-04-07 (docker-container BuildKit driver pollutes the
-# layer cache with AMD64 layers; see upstream PR #148).  Until that is
-# fixed and released we maintain our own image.
+# Why we maintain our own image instead of using upstream:
 #
-# Root causes identified through debugging:
-# 1. docker/build-push-action uses a docker-container Buildx driver whose
-#    BuildKit container resolves base image layers as amd64 on ubuntu-24.04-arm.
-# 2. Even plain 'docker build' can reuse stale amd64 layers from the
-#    runner's layer cache populated by the buildx attempt.
-# 3. 'uname -m' inside a container is unreliable: QEMU binfmt_misc returns
-#    the HOST architecture, masking wrong-arch images.
+#   1. The official ghcr.io/notpunchnox/rkllama:main image has a broken ARM64
+#      build since 2026-04-07 (docker-container BuildKit driver contaminates
+#      the layer cache with amd64 layers; see upstream PR #148).
 #
-# Fixes applied here:
-# - 'docker build --platform linux/arm64' forces Docker to pull the arm64
-#   variant of python:3.12-slim from the registry, bypassing any cached
-#   amd64 layers.
-# - Architecture verification reads the ELF machine type of a known binary
-#   (/usr/local/bin/python3) rather than relying on uname -m.
-#   EM_AARCH64 = 0xb7 at ELF header offset 18; EM_X86_64 = 0x3e.
+#   2. Even a correctly built ARM64 image using the upstream Dockerfile
+#      (FROM python:3.12-slim = Debian Trixie) fails on RK3588 with
+#      "exec format error".  Root cause: Debian ARM64 packages are compiled
+#      with Pointer Authentication (PAC, ARMv8.3-A).  RK3588 (Cortex-A76/A55)
+#      is ARMv8.2-A and does NOT support PAC.  The Linux kernel returns ENOEXEC
+#      when trying to execute PAC-guarded binaries on hardware without PAC.
+#      Ubuntu 24.04 ARM64 packages are NOT compiled with PAC and work correctly
+#      on RK3588.
+#
+# We therefore provide a custom Dockerfile using ubuntu:24.04 as base.
 #
 # Image: ghcr.io/schwankner/rkllama:<RKLLAMA_COMMIT>
 #        ghcr.io/schwankner/rkllama:latest
@@ -41,7 +37,7 @@ env:
 
 jobs:
   build:
-    name: Build rkllama (ARM64)
+    name: Build rkllama (ARM64, Ubuntu base)
     runs-on: ubuntu-24.04-arm
 
     permissions:
@@ -63,30 +59,72 @@ jobs:
       - name: Log into GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
+      # Override the upstream Dockerfile with an Ubuntu 24.04 base.
+      # The upstream uses python:3.12-slim (Debian Trixie) whose ARM64 binaries
+      # require PAC (ARMv8.3-A Pointer Authentication).  RK3588 is ARMv8.2-A
+      # and does not support PAC — the kernel returns ENOEXEC for those binaries.
+      # Ubuntu 24.04 ARM64 does not compile packages with PAC and runs correctly.
+      - name: Write Ubuntu-based Dockerfile
+        run: |
+          cat > Dockerfile.rk3588 << 'DOCKERFILE'
+          FROM ubuntu:24.04
+
+          ENV DEBIAN_FRONTEND=noninteractive
+
+          RUN apt-get update \
+              && apt-get install -y --no-install-recommends \
+                 python3.12 python3.12-dev python3-pip python3.12-venv \
+                 libgomp1 wget curl sudo git build-essential \
+                 ffmpeg libsm6 libxext6 \
+              && rm -rf /var/cache/apt/archives /var/lib/apt/lists/*
+
+          # Make python3.12 the default python3
+          RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1 \
+              && update-alternatives --install /usr/bin/python python3 /usr/bin/python3.12 1
+
+          # Fix setuptools version to prevent: No module named 'pkg_resources'
+          RUN python3 -m pip --no-cache-dir install "setuptools<82.0.0" --break-system-packages
+
+          WORKDIR /opt/rkllama
+
+          COPY ./src/rkllama/lib/librkllmrt.so /usr/lib/
+          RUN chmod 755 /usr/lib/librkllmrt.so && ldconfig
+
+          COPY ./src/rkllama/lib/librknnrt.so /usr/lib/
+          RUN chmod 755 /usr/lib/librknnrt.so && ldconfig
+
+          COPY ./src /opt/rkllama/src
+          RUN mkdir /opt/rkllama/models
+          COPY README.md LICENSE pyproject.toml /opt/rkllama/
+
+          RUN python3 -m pip --no-cache-dir install . --break-system-packages
+
+          EXPOSE 8080
+
+          CMD ["rkllama_server", "--models", "/opt/rkllama/models"]
+          DOCKERFILE
+
       # --platform linux/arm64 forces Docker to pull the arm64 variant of
-      # python:3.12-slim from the registry instead of reusing any stale amd64
-      # layers that may be present in the runner's local layer cache from a
-      # previous buildx run.
+      # ubuntu:24.04 from the registry, bypassing any stale layers in the
+      # runner's local layer cache.
       - name: Build image
         run: |
           docker build \
             --platform linux/arm64 \
+            -f Dockerfile.rk3588 \
             -t "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.sha.outputs.sha }}" \
             -t "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest" \
             .
 
       # Verify ELF machine type, NOT uname -m.
-      # uname -m under QEMU/binfmt_misc always returns the host architecture,
-      # so it cannot detect wrong-arch images.  Instead, read byte 18 of the
-      # ELF header of /usr/local/bin/python3:
-      #   0xb7 = EM_AARCH64 (arm64)  ← expected
-      #   0x3e = EM_X86_64  (amd64)  ← means the build is broken
+      # uname -m under QEMU/binfmt_misc returns the host arch, masking wrong-arch images.
+      # Read ELF header byte 18 of /usr/bin/python3.12: 0xb7 = EM_AARCH64.
       - name: Verify ELF architecture is arm64
         run: |
           machine_byte=$(docker run --rm \
             --entrypoint /bin/sh \
             "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest" \
-            -c 'od -An -j18 -N1 -tx1 /usr/local/bin/python3 | tr -d " \n"')
+            -c 'od -An -j18 -N1 -tx1 /usr/bin/python3.12 | tr -d " \n"')
           echo "ELF machine byte at offset 18: 0x${machine_byte}"
           if [ "$machine_byte" != "b7" ]; then
             echo "ERROR: expected 0xb7 (EM_AARCH64), got 0x${machine_byte} — image is wrong architecture"
@@ -101,8 +139,9 @@ jobs:
 
       - name: Summary
         run: |
-          echo "### RKLLama image built (linux/arm64 verified)" >> "$GITHUB_STEP_SUMMARY"
+          echo "### RKLLama image built (Ubuntu 24.04 base, linux/arm64 verified)" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "- Source ref: \`${{ github.event.inputs.rkllama_ref || 'main' }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Commit: \`${{ steps.sha.outputs.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Base image: ubuntu:24.04 (no PAC, compatible with ARMv8.2-A RK3588)" >> "$GITHUB_STEP_SUMMARY"
           echo "- Image: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.sha.outputs.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
