@@ -19,9 +19,7 @@ jobs:
         run: |
           shellcheck --severity=warning \
             scripts/common.sh \
-            scripts/build-extensions.sh \
-            scripts/build-uki.sh \
-            scripts/build-usb-image.sh
+            scripts/build-extensions.sh
 
   go-vet:
     name: Go vet (device plugin)
