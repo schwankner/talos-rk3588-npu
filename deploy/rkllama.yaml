@@ -72,10 +72,11 @@ spec:
 
       containers:
         - name: rkllama
-          # main tag (2026-04-22) has a broken ARM64 build (exec format error).
-          # Rkllama-Docker (2025-02-16) is the last known-good ARM64 image.
-          image: ghcr.io/notpunchnox/rkllama:Rkllama-Docker
-          imagePullPolicy: IfNotPresent
+          # Built from upstream main via .github/workflows/build-rkllama.yaml
+          # on a native ubuntu-24.04-arm runner (avoids the QEMU/buildcache
+          # bug in upstream PR #148).
+          image: ghcr.io/schwankner/rkllama:latest
+          imagePullPolicy: Always
 
           securityContext:
             procMount: Unmasked
