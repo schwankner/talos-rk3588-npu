@@ -85,6 +85,9 @@ spec:
             - name: lib
               mountPath: /usr/lib
               readOnly: true
+            - name: etc-cdi
+              mountPath: /etc/cdi
+              readOnly: true
 
       volumes:
         - name: device-plugin
@@ -106,4 +109,8 @@ spec:
         - name: lib
           hostPath:
             path: /usr/lib
+            type: Directory
+        - name: etc-cdi
+          hostPath:
+            path: /etc/cdi
             type: Directory
