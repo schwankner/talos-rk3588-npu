@@ -394,16 +394,22 @@ Tested on **Turing RK1 (RK3588)** in a Kubernetes pod (no `privileged: true`,
 CDI-injected devices, `procMount: Unmasked`), Talos v1.13.0-rc.0 / kernel 6.18.22-talos,
 rknpu.ko 0.9.8, librknnrt.so 2.3.2, rknn-toolkit-lite2 2.3.2.
 
-### ⚠️ Hardware limitation: only 1 of 3 NPU cores accessible
+### All 3 NPU cores accessible (6 TOPS)
 
-The RK3588 NPU is documented as 6 TOPS (3 cores × 2 TOPS). On this kernel configuration,
-**only CORE_0 (2 TOPS) is accessible.** CORE_1 and CORE_2 submit commands to hardware
-but never fire an interrupt — the rknpu.ko driver runs in non-IOMMU mode because the
-`npu@fdab0000` Device Tree node lacks the `iommus` property. CORE_1/CORE_2 time out
-after 6 s per inference attempt.
+The RK3588 NPU has 3 sub-cores (CORE_0, CORE_1, CORE_2, 2 TOPS each = 6 TOPS total).
+All three are accessible with this configuration — rknpu.ko runs in IOMMU mode, all
+three IOMMU controllers are held active, and all sub-cores respond to inference requests.
 
-All results below are single-core (CORE_0 / CORE_AUTO). See [Bug 52 in BUGS.md](BUGS.md)
-for root cause, diagnostic table, and the DT fix path.
+**Per-core diagnostic (ResNet18 INT8, 10 iterations):**
+
+| Core mask | init_runtime | 10-iter avg | Throughput |
+|-----------|-------------|-------------|-----------|
+| CORE_AUTO (0) | ret=0 | 7.0 ms | 143.8 fps |
+| CORE_0 (1) | ret=0 | 7.0 ms | 142.2 fps |
+| CORE_1 (2) | ret=0 | 7.2 ms | 138.4 fps |
+| CORE_2 (4) | ret=0 | 7.3 ms | 136.9 fps |
+| CORE_0+1 (3) | ret=0 | 6.9 ms | 144.5 fps |
+| CORE_0+1+2 (7) | ret=0 | **5.6 ms** | **179.6 fps** |
 
 ### Single-thread results
 
@@ -436,11 +442,7 @@ ResNet18) is DMA buffer setup and kernel-driver round-trip overhead — not Pyth
 overhead. Python `rknnlite` overhead in SDK 2.3.2 is only **~0.5 ms** per call
 (not the 3–5 ms often cited for older SDKs).
 
-### Multi-thread C API results (all threads on CORE_0)
-
-Since only CORE_0 is accessible, multiple threads share one NPU command queue.
-Aggregate throughput saturates at the single-core limit; per-thread latency
-grows linearly. A small aggregate gain (~7%) comes from DMA pipelining.
+### Multi-thread C API results
 
 **ResNet18 INT8, 1000 iters/thread:**
 
@@ -457,19 +459,12 @@ grows linearly. A small aggregate gain (~7%) comes from DMA pipelining.
 | 1       | 21.5 fps        | 46.41 ms               | baseline         |
 | 3       | 38.8 fps        | 68.81 ms (+1.5×)       | +1.8× aggregate  |
 
-The 1.8× aggregate gain for YOLOv5s (larger model, longer transfer) is from overlapping
-`rknn_inputs_set` (DMA copy) of one context with `rknn_run` of another — not from
-parallel core execution.
-
 ### Key takeaway
 
 > The primary result is not the speedup ratio — it is that the **full stack works
 > end-to-end**: rknpu 0.9.8, librknnrt 2.3.2, CDI device injection, `procMount: Unmasked`,
-> Talos v1.13.0-rc.0 / kernel 6.18.22, **without `privileged: true`**.
->
-> Once the Device Tree `iommus` property is fixed (see Bug 52), all three NPU cores
-> will be available and multi-context inference should reach ~3× the single-core
-> figures above (~440 fps ResNet18 INT8, ~65 fps YOLOv5s INT8).
+> Talos v1.13.0-rc.0 / kernel 6.18.22, **without `privileged: true`**, with all 3 NPU
+> sub-cores accessible (6 TOPS).
 
 ---
 
@@ -487,7 +482,7 @@ See [BUGS.md](BUGS.md) for documented issues and solutions. Selected entries:
 | Bug 49 | `RKNN_NPU_CORE_AUTO` with concurrent multi-context inference deadlocks rknpu.ko |
 | Bug 50 | BuildKit layer-diff zeroes gcc binaries when large download + compile land in same RUN layer |
 | Bug 51 | Concurrent `rknn_init` from N threads crashes rknpu.ko kernel driver |
-| **Bug 52** | **CORE_1 and CORE_2 inaccessible — rknpu.ko non-IOMMU mode, missing DT `iommus` property; effective NPU: 2 TOPS instead of 6 TOPS** |
+| Bug 52 ✅ | CORE_1 and CORE_2 inaccessible — rknpu.ko non-IOMMU mode, missing DT `iommus` property. Fixed: DTB patcher adds `iommus` property; driver patch holds all 3 IOMMU clocks active. All 3 cores verified working (179.6 fps CORE_0_1_2). |
 
 ---
 
