@@ -53,6 +53,12 @@ const (
 	// cdiSpec is the static CDI spec content, matching the file installed
 	// by the rockchip-rknpu system extension at /etc/cdi/rockchip-npu.yaml.
 	// Must be kept in sync with rockchip-rknpu/files/rockchip-npu.cdi.yaml.
+	//
+	// Both /dev/rknpu and /dev/dma_heap/system are declared as deviceNodes so
+	// containerd adds them to the container device list, creates the nodes
+	// (bind-mount for pre-existing devices), and updates the cgroupv2 device
+	// eBPF allowlist automatically. librknnrt.so is a regular file and uses a
+	// mount entry.
 	cdiSpec = `cdiVersion: "0.6.0"
 kind: "rockchip.com/npu"
 devices:
@@ -61,13 +67,12 @@ devices:
       deviceNodes:
         - path: "/dev/rknpu"
           permissions: "rw"
+        - path: "/dev/dma_heap/system"
+          permissions: "rw"
       mounts:
         - hostPath: "/usr/lib/librknnrt.so"
           containerPath: "/usr/lib/librknnrt.so"
           options: ["ro", "bind"]
-        - hostPath: "/dev/dma_heap/system"
-          containerPath: "/dev/dma_heap/system"
-          options: ["rw", "bind"]
 `
 
 	pollInterval = 10 * time.Second
@@ -184,29 +189,15 @@ func (p *npuPlugin) Allocate(_ context.Context, req *v1beta1.AllocateRequest) (*
 
 	resp := &v1beta1.AllocateResponse{}
 	for range req.ContainerRequests {
-		cr := &v1beta1.ContainerAllocateResponse{
-			// CDI path: containerd resolves "rockchip.com/npu=0" against the spec
-			// installed by the rockchip-rknpu system extension at
-			// /etc/cdi/rockchip-npu.yaml, injecting /dev/rknpu, /dev/dma_heap/system,
-			// and the librknnrt.so bind-mount automatically.
-			CDIDevices: []*v1beta1.CDIDevice{{Name: cdiDeviceRef}},
-			// DeviceSpec: kubelet uses this to add device nodes to the cgroupv2
-			// device eBPF allowlist. CDI handles bind-mounts and permissions;
-			// DeviceSpec ensures the kernel cgroup allowlist is updated too.
-			Devices: []*v1beta1.DeviceSpec{
-				{
-					HostPath:      rknpuMiscDev,
-					ContainerPath: rknpuMiscDev,
-					Permissions:   "rw",
-				},
-				{
-					HostPath:      "/dev/dma_heap/system",
-					ContainerPath: "/dev/dma_heap/system",
-					Permissions:   "rw",
-				},
+		// Pure CDI allocation: containerd resolves "rockchip.com/npu=0" against
+		// /run/cdi/rockchip-npu.yaml and injects /dev/rknpu, /dev/dma_heap/system
+		// (both as deviceNodes → cgroup allowlist + bind-mount), and
+		// /usr/lib/librknnrt.so (mount). No redundant DeviceSpec needed.
+		resp.ContainerResponses = append(resp.ContainerResponses,
+			&v1beta1.ContainerAllocateResponse{
+				CDIDevices: []*v1beta1.CDIDevice{{Name: cdiDeviceRef}},
 			},
-		}
-		resp.ContainerResponses = append(resp.ContainerResponses, cr)
+		)
 	}
 	return resp, nil
 }
