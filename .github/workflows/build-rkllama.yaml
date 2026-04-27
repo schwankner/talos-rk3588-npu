@@ -78,18 +78,15 @@ jobs:
                  ffmpeg libsm6 libxext6 \
               && rm -rf /var/cache/apt/archives /var/lib/apt/lists/*
 
-          # python3 already points to python3.12 after package install.
-          # Add a bare 'python' alias via symlink (update-alternatives with
-          # the same group name would rename /usr/bin/python3 → /usr/bin/python).
-          RUN ln -sf /usr/bin/python3 /usr/bin/python
+          # Use a virtual environment to avoid Ubuntu 24.04's PEP 668
+          # "externally-managed-environment" restriction and the apt pip RECORD
+          # file issue.  Inside a venv there is no EXTERNALLY-MANAGED marker
+          # and pip can upgrade / install freely.
+          RUN python3 -m venv /opt/venv
+          ENV PATH="/opt/venv/bin:$PATH"
 
-          # Ubuntu 24.04's apt-installed pip 24.0 lacks a RECORD file, so
-          # 'pip install --upgrade pip' fails with "Cannot uninstall pip 24.0".
-          # Re-install pip via get-pip.py which handles the debian case and
-          # installs a fresh pip into /usr/local without touching the apt one.
-          # Then fix setuptools to prevent: No module named 'pkg_resources'
-          RUN curl -fsSL https://bootstrap.pypa.io/get-pip.py | python3 \
-              && pip3 --no-cache-dir install "setuptools<82.0.0"
+          RUN pip install --no-cache-dir --upgrade pip \
+              && pip install --no-cache-dir "setuptools<82.0.0"
 
           WORKDIR /opt/rkllama
 
@@ -103,7 +100,7 @@ jobs:
           RUN mkdir /opt/rkllama/models
           COPY README.md LICENSE pyproject.toml /opt/rkllama/
 
-          RUN python3 -m pip --no-cache-dir install . --break-system-packages
+          RUN pip install --no-cache-dir .
 
           EXPOSE 8080
 
