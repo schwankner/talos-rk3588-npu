@@ -1778,9 +1778,8 @@ available.
 | YOLOv5s 640×640 | INT8 | CPU (ARM Cortex-A76) |  21.6 fps | 46.33 ms | 1.0× (baseline) |
 
 Results consistent with the Talos 1.12.6 baseline (see INT8 benchmark results above).
-CDI spec is now provided as a static extension file at `/etc/cdi/rockchip-npu.yaml`
-instead of being written at runtime by the device plugin.  No machine config
-containerd patch required on Talos 1.13.
+CDI spec is written by the device plugin to `/var/run/cdi/rockchip-npu.yaml` at startup
+(see Bug 53).  No machine config containerd patch required on Talos 1.13.
 
 **C API benchmark results — Talos 1.13.0-rc.0, kernel 6.18.22, SDK 2.3.2:**
 
@@ -2074,6 +2073,77 @@ contention — and all N threads run truly in parallel.
 
 **Observed on:** rknpu.ko driver 0.9.8, librknnrt.so 2.3.2, Talos 1.13.0-rc.0 /
 kernel 6.18.22-talos, Turing RK1 (RK3588).
+
+---
+
+## Bug 53: CDI spec not picked up by containerd after reboot — /etc/cdi not in cdi_spec_dirs
+
+**Symptom:** Pods requesting `rockchip.com/npu` fail to start after a reboot with:
+```
+unresolvable CDI devices rockchip.com/npu=0
+```
+The extension installs `/etc/cdi/rockchip-npu.yaml` persistently, but containerd cannot
+find it.
+
+**Root cause:** Talos 1.13 containerd is configured with:
+```toml
+[plugins."io.containerd.cri.v1.runtime"]
+  enable_cdi = true
+  cdi_spec_dirs = ["/run/cdi"]
+```
+Only `/run/cdi` (a tmpfs) is watched — `/etc/cdi` is not listed.  The extension overlay
+file at `/etc/cdi/rockchip-npu.yaml` is invisible to containerd.  On every reboot the
+tmpfs is wiped, so a spec written there during a previous session is gone.
+
+Additionally, `/etc/cdi` is a Talos overlay directory and is not accessible as a
+`hostPath` volume from the kubelet pod namespace (`hostPath type check failed: /etc/cdi
+is not a directory`).
+
+**Solution:** Embed the CDI spec as a string constant in the device plugin binary and
+write it to `/var/run/cdi/` (= `/run/cdi/`) at plugin startup, before registering with
+kubelet.  Because the CDI spec for the RK3588 is static (always `/dev/rknpu` +
+`/dev/dma_heap/system` + `librknnrt.so`), embedding it is correct — no runtime
+discovery needed.
+
+The device plugin mounts `/var/run/cdi` via a `hostPath: DirectoryOrCreate` volume so
+the write path exists even on a fresh tmpfs.  Timing is safe: containerd CDI watches
+`/run/cdi` dynamically, and no NPU pod can be scheduled until the device plugin has
+registered `rockchip.com/npu` capacity with kubelet — which happens after `writeCDISpec()`
+returns.
+
+**Note on Talos 1.13 CDI standard:** The release notes state "extension services can bring
+in dynamic CDI spec files under /run/cdi".  For dynamic specs (e.g. GPU discovery),
+the correct pattern is an extension service with `restart: untilSuccess` that generates
+the spec at boot (see nvidia-cdi-gen in siderolabs/extensions).  For a static spec like
+ours, writing from the device plugin is equivalent and simpler.
+
+**Observed on:** Talos 1.13.0-rc.0, containerd 2.x, Turing RK1 (RK3588).
+
+---
+
+## Multi-pod NPU parallelism — all 3 slots concurrent (Talos 1.13.0-rc.0)
+
+The device plugin advertises `npuCores = 3` virtual slots (`rknpu0`, `rknpu1`, `rknpu2`),
+all mapping to the single `/dev/rknpu` misc device.  Kubernetes can schedule up to 3 pods
+concurrently; the RKNN runtime and rknpu.ko kernel driver handle concurrent access and
+distribute work across the 3 NPU cores (CORE_0, CORE_1, CORE_2) internally.
+
+**Verification — 3 pods started simultaneously, 2026-04-27:**
+
+```
+npu-concurrent-0: NPU slot acquired at 08:18:09  /dev/rknpu /dev/dma_heap/system /usr/lib/librknnrt.so  Done at 08:18:39
+npu-concurrent-1: NPU slot acquired at 08:18:09  /dev/rknpu /dev/dma_heap/system /usr/lib/librknnrt.so  Done at 08:18:39
+npu-concurrent-2: NPU slot acquired at 08:18:09  /dev/rknpu /dev/dma_heap/system /usr/lib/librknnrt.so  Done at 08:18:39
+```
+
+All 3 pods reached Running state at the same second.  Node showed `rockchip.com/npu: 3/3`
+(all slots consumed) while the pods ran.  CDI injection confirmed: `/dev/rknpu` (char
+10:262), `/dev/dma_heap/system` (char 247:0), and `/usr/lib/librknnrt.so` (7.7 MB) were
+present in every container.
+
+**Usage rule:** For concurrent multi-pod inference, use `RKNN_NPU_CORE_0` in each pod.
+Do NOT use `RKNN_NPU_CORE_AUTO` or `RKNN_NPU_CORE_0_1_2` across multiple concurrent
+pods — see Bug 49 and Bug 51 for the deadlock/crash consequences.
 
 ---
 

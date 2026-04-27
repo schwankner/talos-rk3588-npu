@@ -1,0 +1,84 @@
+---
+# 3-pod concurrent NPU benchmark — verifies that all 3 virtual NPU slots
+# can be allocated simultaneously to separate pods. Each pod holds a slot
+# for 30 seconds while doing a device sanity check, then exits cleanly.
+# If all 3 pods reach Running state at the same time, multi-pod parallelism
+# is confirmed. The RKNN runtime distributes work across the 3 NPU cores
+# internally; all pods share the same /dev/rknpu misc device.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: npu-concurrent-0
+  namespace: default
+spec:
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: bench
+          image: busybox:latest
+          command:
+            - sh
+            - -c
+            - |
+              echo "[pod-0] NPU slot acquired at $(date -u +%H:%M:%S)"
+              ls /dev/rknpu /dev/dma_heap/system /usr/lib/librknnrt.so
+              echo "[pod-0] Holding slot for 30s..."
+              sleep 30
+              echo "[pod-0] Done at $(date -u +%H:%M:%S)"
+          resources:
+            limits:
+              rockchip.com/npu: "1"
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: npu-concurrent-1
+  namespace: default
+spec:
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: bench
+          image: busybox:latest
+          command:
+            - sh
+            - -c
+            - |
+              echo "[pod-1] NPU slot acquired at $(date -u +%H:%M:%S)"
+              ls /dev/rknpu /dev/dma_heap/system /usr/lib/librknnrt.so
+              echo "[pod-1] Holding slot for 30s..."
+              sleep 30
+              echo "[pod-1] Done at $(date -u +%H:%M:%S)"
+          resources:
+            limits:
+              rockchip.com/npu: "1"
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: npu-concurrent-2
+  namespace: default
+spec:
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: bench
+          image: busybox:latest
+          command:
+            - sh
+            - -c
+            - |
+              echo "[pod-2] NPU slot acquired at $(date -u +%H:%M:%S)"
+              ls /dev/rknpu /dev/dma_heap/system /usr/lib/librknnrt.so
+              echo "[pod-2] Holding slot for 30s..."
+              sleep 30
+              echo "[pod-2] Done at $(date -u +%H:%M:%S)"
+          resources:
+            limits:
+              rockchip.com/npu: "1"

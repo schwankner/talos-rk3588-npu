@@ -1,0 +1,33 @@
+---
+# NPU diagnostic pod — verifies CDI injection and device access.
+# Requests 1 rockchip.com/npu slot; containerd injects /dev/rknpu,
+# /dev/dma_heap/system, and /usr/lib/librknnrt.so via the CDI spec.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: npu-diag
+  namespace: default
+spec:
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: diag
+          image: busybox:latest
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              echo "=== NPU Diagnostic ==="
+              echo "--- Device nodes ---"
+              ls -la /dev/rknpu /dev/dma_heap/system
+              echo "--- Runtime library ---"
+              ls -la /usr/lib/librknnrt.so
+              echo "--- /dev/rknpu char device info ---"
+              stat /dev/rknpu
+              echo "=== PASS ==="
+          resources:
+            limits:
+              rockchip.com/npu: "1"
