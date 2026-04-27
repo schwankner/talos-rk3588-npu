@@ -13,13 +13,13 @@
 #
 # Usage in a pod:
 #   spec:
-#     hostUsers: false
 #     containers:
-#       - securityContext:
-#           procMount: Unmasked
-#         resources:
+#       - resources:
 #           limits:
 #             rockchip.com/npu: "1"
+#
+# Up to 3 pods can hold rockchip.com/npu simultaneously (one per NPU core).
+# All slots share /dev/rknpu; the RKNN runtime distributes work across cores.
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -55,7 +55,7 @@ spec:
 
       containers:
         - name: rk3588-npu-device-plugin
-          image: ghcr.io/schwankner/rk3588-npu-device-plugin:23c4078
+          image: ghcr.io/schwankner/rk3588-npu-device-plugin:aebe48d
           imagePullPolicy: Always
 
           securityContext:
