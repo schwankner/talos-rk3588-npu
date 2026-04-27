@@ -50,6 +50,12 @@ _bldr/
 .claude/
 CLAUDE.md
 
+# Local cluster credentials (never commit)
+npu-test-kubeconfig
+npu-test-talosconfig
+*-kubeconfig
+*-talosconfig
+
 # macOS
 .DS_Store
 .AppleDouble

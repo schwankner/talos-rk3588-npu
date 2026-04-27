@@ -6,10 +6,9 @@ devices:
       deviceNodes:
         - path: "/dev/rknpu"
           permissions: "rw"
+        - path: "/dev/dma_heap/system"
+          permissions: "rw"
       mounts:
         - hostPath: "/usr/lib/librknnrt.so"
           containerPath: "/usr/lib/librknnrt.so"
           options: ["ro", "bind"]
-        - hostPath: "/dev/dma_heap/system"
-          containerPath: "/dev/dma_heap/system"
-          options: ["rw", "bind"]
