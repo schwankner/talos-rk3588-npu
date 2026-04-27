@@ -1,0 +1,123 @@
+---
+# RKLLama – LLM inference server on RK3588 NPU
+#
+# Models are stored on the host at /var/lib/rkllama/models (persists across rescheduling).
+# Access the OpenAI-compatible API at NodePort 31434.
+#
+# Pull models after deploy:
+#   kubectl exec -n kube-system deploy/rkllama -- rkllama pull <model>
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: rkllama
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: rkllama-models-pv
+spec:
+  capacity:
+    storage: 20Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  hostPath:
+    path: /var/lib/rkllama/models
+    type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: rkllama-models
+  namespace: rkllama
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+  volumeName: rkllama-models-pv
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rkllama
+  namespace: rkllama
+  labels:
+    app: rkllama
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rkllama
+  template:
+    metadata:
+      labels:
+        app: rkllama
+    spec:
+      # Required for procMount: Unmasked (RKLLM reads /proc/device-tree/compatible)
+      hostUsers: false
+
+      nodeSelector:
+        kubernetes.io/arch: arm64
+
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: rockchip.com/npu-capable
+                    operator: In
+                    values: ["true"]
+
+      containers:
+        - name: rkllama
+          # main tag (2026-04-22) has a broken ARM64 build (exec format error).
+          # Rkllama-Docker (2025-02-16) is the last known-good ARM64 image.
+          image: ghcr.io/notpunchnox/rkllama:Rkllama-Docker
+          imagePullPolicy: IfNotPresent
+
+          securityContext:
+            procMount: Unmasked
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: ["ALL"]
+
+          ports:
+            - containerPort: 8080
+              name: http
+
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+              rockchip.com/npu: "1"
+            limits:
+              cpu: "8"
+              memory: 16Gi
+              rockchip.com/npu: "1"
+
+          volumeMounts:
+            - name: models
+              mountPath: /opt/rkllama/models
+
+      volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: rkllama-models
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rkllama
+  namespace: rkllama
+spec:
+  type: NodePort
+  selector:
+    app: rkllama
+  ports:
+    - port: 8080
+      targetPort: 8080
+      nodePort: 31434
+      name: http
