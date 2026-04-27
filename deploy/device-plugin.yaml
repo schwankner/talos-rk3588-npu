@@ -2,11 +2,10 @@
 # RK3588 NPU Device Plugin DaemonSet
 #
 # Runs on every node labeled rockchip.com/npu-capable=true.
-# Discovers the NPU DRM device nodes dynamically via sysfs:
-#   /sys/bus/platform/drivers/RKNPU/fdab0000.rknpu/drm/
+# Discovers the NPU misc device /dev/rknpu (registered by rknpu.ko).
 # Registers rockchip.com/npu with the kubelet and writes the CDI spec to
-# /var/run/cdi/rockchip-npu.yaml so containerd injects the DRM render node,
-# card node, dma_heap, and librknnrt.so into requesting containers.
+# /var/run/cdi/rockchip-npu.yaml so containerd injects /dev/rknpu,
+# /dev/dma_heap/system, and librknnrt.so into requesting containers.
 #
 # Label NPU-capable nodes before deploying:
 #   kubectl label node <node-name> rockchip.com/npu-capable=true
@@ -55,7 +54,7 @@ spec:
 
       containers:
         - name: rk3588-npu-device-plugin
-          image: ghcr.io/schwankner/rk3588-npu-device-plugin:85b1a0c
+          image: ghcr.io/schwankner/rk3588-npu-device-plugin:f890827
           imagePullPolicy: Always
 
           securityContext:
@@ -77,14 +76,8 @@ spec:
               mountPath: /var/lib/kubelet/device-plugins
             - name: dev
               mountPath: /dev
-            - name: sys
-              mountPath: /sys
-              readOnly: true
             - name: cdi
               mountPath: /var/run/cdi
-            - name: lib
-              mountPath: /usr/lib
-              readOnly: true
 
       volumes:
         - name: device-plugin
@@ -95,15 +88,7 @@ spec:
           hostPath:
             path: /dev
             type: Directory
-        - name: sys
-          hostPath:
-            path: /sys
-            type: Directory
         - name: cdi
           hostPath:
             path: /var/run/cdi
             type: DirectoryOrCreate
-        - name: lib
-          hostPath:
-            path: /usr/lib
-            type: Directory
