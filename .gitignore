@@ -16,6 +16,11 @@ _out/
 *.symvers
 modules.order
 Module.symvers
+usr/
+
+# RKNN model and toolkit binaries (large; fetch at build time)
+*.rknn
+*.whl
 
 # Go build artifacts
 plugins/*/rk3588-npu-device-plugin
