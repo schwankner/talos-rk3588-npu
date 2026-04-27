@@ -5,13 +5,25 @@ name: Build RKLLama
 # commit we pin changes.
 #
 # The official ghcr.io/notpunchnox/rkllama:main image has a broken ARM64
-# build since 2026-04-07 (docker-container BuildKit driver pulls AMD64
-# base layers even on ARM64 runners, see upstream PR #148).  Until that
-# is fixed and released we maintain our own image.
+# build since 2026-04-07 (docker-container BuildKit driver pollutes the
+# layer cache with AMD64 layers; see upstream PR #148).  Until that is
+# fixed and released we maintain our own image.
 #
-# We use plain `docker build` (not docker/build-push-action with the
-# docker-container Buildx driver) so that the local Docker daemon on the
-# ARM64 runner builds natively without any BuildKit-container indirection.
+# Root causes identified through debugging:
+# 1. docker/build-push-action uses a docker-container Buildx driver whose
+#    BuildKit container resolves base image layers as amd64 on ubuntu-24.04-arm.
+# 2. Even plain 'docker build' can reuse stale amd64 layers from the
+#    runner's layer cache populated by the buildx attempt.
+# 3. 'uname -m' inside a container is unreliable: QEMU binfmt_misc returns
+#    the HOST architecture, masking wrong-arch images.
+#
+# Fixes applied here:
+# - 'docker build --platform linux/arm64' forces Docker to pull the arm64
+#   variant of python:3.12-slim from the registry, bypassing any cached
+#   amd64 layers.
+# - Architecture verification reads the ELF machine type of a known binary
+#   (/usr/local/bin/python3) rather than relying on uname -m.
+#   EM_AARCH64 = 0xb7 at ELF header offset 18; EM_X86_64 = 0x3e.
 #
 # Image: ghcr.io/schwankner/rkllama:<RKLLAMA_COMMIT>
 #        ghcr.io/schwankner/rkllama:latest
@@ -51,25 +63,36 @@ jobs:
       - name: Log into GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
-      # Use plain docker build against the native Docker daemon — NOT docker
-      # buildx with the docker-container driver.  The docker-container driver
-      # spawns a BuildKit container which can mis-detect architecture and pull
-      # AMD64 base layers even on a native ARM64 host.
+      # --platform linux/arm64 forces Docker to pull the arm64 variant of
+      # python:3.12-slim from the registry instead of reusing any stale amd64
+      # layers that may be present in the runner's local layer cache from a
+      # previous buildx run.
       - name: Build image
         run: |
           docker build \
+            --platform linux/arm64 \
             -t "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.sha.outputs.sha }}" \
             -t "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest" \
             .
 
-      - name: Verify architecture
+      # Verify ELF machine type, NOT uname -m.
+      # uname -m under QEMU/binfmt_misc always returns the host architecture,
+      # so it cannot detect wrong-arch images.  Instead, read byte 18 of the
+      # ELF header of /usr/local/bin/python3:
+      #   0xb7 = EM_AARCH64 (arm64)  ← expected
+      #   0x3e = EM_X86_64  (amd64)  ← means the build is broken
+      - name: Verify ELF architecture is arm64
         run: |
-          arch=$(docker run --rm "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest" uname -m)
-          echo "Container reports: $arch"
-          if [ "$arch" != "aarch64" ]; then
-            echo "ERROR: expected aarch64, got $arch"
+          machine_byte=$(docker run --rm \
+            --entrypoint /bin/sh \
+            "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest" \
+            -c 'od -An -j18 -N1 -tx1 /usr/local/bin/python3 | tr -d " \n"')
+          echo "ELF machine byte at offset 18: 0x${machine_byte}"
+          if [ "$machine_byte" != "b7" ]; then
+            echo "ERROR: expected 0xb7 (EM_AARCH64), got 0x${machine_byte} — image is wrong architecture"
             exit 1
           fi
+          echo "Confirmed: image is linux/arm64"
 
       - name: Push image
         run: |
@@ -78,7 +101,7 @@ jobs:
 
       - name: Summary
         run: |
-          echo "### RKLLama image built" >> "$GITHUB_STEP_SUMMARY"
+          echo "### RKLLama image built (linux/arm64 verified)" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "- Source ref: \`${{ github.event.inputs.rkllama_ref || 'main' }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Commit: \`${{ steps.sha.outputs.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
