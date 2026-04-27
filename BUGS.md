@@ -8,7 +8,7 @@ Hard-won solutions to non-obvious problems. Updated as issues are discovered and
 
 **Symptom:** RKNN inference runs on CPU instead of NPU. No error is thrown.
 
-**Root cause:** The RKNN runtime (`librknnrt.so`) reads `/proc/device-tree/compatible` at startup to detect the SoC platform (`rk3588`). Kubernetes masks `/proc` in all containers by default via the mount namespace. When the runtime cannot read this file, it silently falls back to CPU.
+**Root cause:** The RKNN runtime (`librknnrt.so`) reads `/proc/device-tree/compatible` at startup to detect the SoC platform (`rk3588`). When the runtime cannot read this file, it silently falls back to CPU.
 
 **Why BSP kernel 6.1 cannot fix this:** `procMount: Unmasked` requires `hostUsers: false` (user namespaces), which requires `MOUNT_ATTR_IDMAP` support for tmpfs. This was added in Linux 6.3. The Rockchip BSP kernel is 6.1 and cannot be upgraded without losing vendor driver support.
 
@@ -20,6 +20,23 @@ spec:
     procMount: Unmasked
 ```
 This unmasks `/proc` in the container without requiring `privileged: true`.
+
+**Update — Talos 1.13.0-rc.0 / kernel 6.18.22-talos (2026-04-27):**
+
+`/proc/device-tree/compatible` is **readable by default** in standard pods on this
+configuration — `procMount: Unmasked` is not required. Verified with a pod that has
+no special proc settings and no `hostUsers: false`:
+
+```
+$ cat /proc/device-tree/compatible
+turing,rk1rockchip,rk3588   ← readable, no procMount: Unmasked needed
+```
+
+This was confirmed both with and without CDI injection (`rockchip.com/npu`).
+Containerd on Talos 1.13 / kernel 6.18 does not mask `/proc/device-tree`.
+
+The `procMount: Unmasked` workaround remains documented for older Talos versions or
+other distributions where `/proc/device-tree` may be masked.
 
 **References:**
 - https://github.com/immich-app/immich/issues/25057

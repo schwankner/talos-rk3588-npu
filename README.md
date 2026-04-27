@@ -330,12 +330,13 @@ kind: Pod
 metadata:
   name: rknn-inference
 spec:
-  hostUsers: false
-  securityContext:
-    procMount: Unmasked
   containers:
     - name: inference
       image: your-rknn-app:latest
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
       resources:
         limits:
           rockchip.com/npu: "1"
@@ -352,18 +353,25 @@ causes containerd to inject:
 | `/dev/dma_heap/system` | `/dev/dma_heap/system` | Zero-copy CPU↔NPU DMA buffer allocation |
 | `/usr/lib/librknnrt.so` | `/usr/lib/librknnrt.so` | RKNN runtime (bind-mount from Talos extension) |
 
-### Why `hostUsers: false` + `procMount: Unmasked`
+### Note on `procMount: Unmasked`
 
 `librknnrt.so` calls `open("/proc/device-tree/compatible", O_RDONLY)` during
-`init_runtime()` to identify the SoC. Without `procMount: Unmasked`, this path is
-hidden by a read-only empty tmpfs and `init_runtime()` fails with a generic error.
+`init_runtime()` to identify the SoC. On Talos 1.13 / kernel 6.18, this path is
+**readable by default** in standard pods — `procMount: Unmasked` and `hostUsers: false`
+are **not required**.
 
-`procMount: Unmasked` requires user namespaces (`hostUsers: false`), which in turn
-requires mainline kernel 6.3+ (`MOUNT_ATTR_IDMAP` for tmpfs). The Talos sbc-rockchip
-overlay ships kernel 6.18 which satisfies this.
+On older Talos versions or other distributions where containerd masks `/proc/device-tree`,
+add these fields to the pod spec:
 
-> **This does not work on BSP kernel 6.1** (Orange Pi stock, Radxa stock images) —
-> no workaround exists on that kernel.
+```yaml
+spec:
+  hostUsers: false
+  securityContext:
+    procMount: Unmasked
+```
+
+> `procMount: Unmasked` requires kernel 6.3+ (`MOUNT_ATTR_IDMAP` for tmpfs).
+> **This does not work on BSP kernel 6.1** (Orange Pi stock, Radxa stock images).
 
 ---
 
