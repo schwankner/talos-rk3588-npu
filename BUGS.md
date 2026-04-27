@@ -2147,4 +2147,57 @@ pods — see Bug 49 and Bug 51 for the deadlock/crash consequences.
 
 ---
 
+## Bug 55: RKNPU_MEM_CREATE fails for large model buffers — dma_alloc_coherent() cannot satisfy ≥ ~1 GB in IOMMU translated mode
+
+**Symptom:** rkllama (librknnrt.so 2.3.x) fails to load RKLLM models ≥ ~1 GB with:
+```
+E RKNN: failed to allocate fd, ret: -1, errno: 12, size: 2614099968, flags: 0x2
+```
+The gemma2:2b model requires a single 2.4 GB contiguous allocation. The RKNN runtime calls
+`RKNPU_MEM_CREATE` for each model weight tensor; the 2.4 GB call returns `-ENOMEM` even
+with 26 GB of free system RAM. Smaller allocations (< ~128 MB) succeed.
+
+**Root cause:** Our `rknpu_mem_create_ioctl()` called `dma_alloc_coherent(dev, 2.4GB, ...)`.
+`dma_alloc_coherent()` requires either a physically contiguous allocation or a CMA-backed
+allocation. Under IOMMU translated mode (required since Bug 52), the kernel's coherent DMA
+path for large allocations is limited by the CMA pool size (`cma=128MB` in our
+machineconfig). 2.4 GB >> 128 MB → -ENOMEM.
+
+The direct DMA heap (`/dev/dma_heap/system`) CAN allocate 2.4 GB because it uses scatter
+pages mapped into a single IOVA window by the SMMU. Our rknpu ioctl was not using this
+path.
+
+**Fix:** Replace `dma_alloc_coherent()` with `dma_alloc_noncontiguous()` +
+`dma_vmap_noncontiguous()` in `rknpu_mem_create_ioctl()`:
+
+```c
+struct rknpu_mem_buf {
+    struct rknpu_mem_object  mem;   /* MUST be first — cast target in submit */
+    struct device           *dev;
+    struct sg_table         *sgt;   /* scatter pages, IOMMU-mapped to single IOVA */
+};
+
+buf->sgt = dma_alloc_noncontiguous(buf->dev, buf->mem.size,
+                                   DMA_BIDIRECTIONAL, GFP_KERNEL, 0);
+buf->mem.kv_addr = dma_vmap_noncontiguous(buf->dev, buf->mem.size, buf->sgt);
+buf->mem.dma_addr = sg_dma_address(buf->sgt->sgl);  /* IOVA base */
+```
+
+`dma_alloc_noncontiguous()` allocates scatter pages from the system (no CMA required)
+and maps them into a single contiguous IOVA window via the SMMU. The NPU hardware sees a
+contiguous DMA address range (IOVA). `dma_vmap_noncontiguous()` provides a contiguous
+kernel virtual address for `rknpu_job.c` to read the task/command array.
+
+The `anon_inode_getfd()` approach for `mmap()` support is preserved:
+`rknpu_mem_obj_mmap()` calls `dma_mmap_noncontiguous()`.
+
+**Requires:** IOMMU translated mode (`iommu.passthrough=1` must NOT be set). With IOMMU
+passthrough, `dma_alloc_noncontiguous()` falls back to a physically-contiguous path which
+again fails for 2.4 GB.
+
+**Observed on:** rknpu.ko 0.9.10, librknnrt.so 2.3.2, Talos 1.13.0-rc.0 /
+kernel 6.18.22-talos, Turing RK1 (RK3588). gemma2:2b (2.4 GB) fails without this fix.
+
+---
+
 *Add new bugs above this line, most recent first.*

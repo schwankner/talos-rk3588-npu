@@ -62,11 +62,16 @@ steps:
           echo "(no RKNPU entries in autoconf.h)" && \
           echo "=== end autoconf.h ==="
 
-        # Install rknpu_mem.c stub — the w568w driver declares
-        # rknpu_mem_{create,destroy,sync}_ioctl in rknpu_mem.h and calls them
-        # from rknpu_misc_ioctl, but provides no definitions.  The stubs return
-        # -ENOSYS; librknnrt.so uses /dev/dma_heap/system for memory and never
-        # calls these ioctls, so the module links and functions correctly.
+        # Install rknpu_mem.c — the w568w driver declares
+        # rknpu_mem_{create,destroy,sync}_ioctl in rknpu_mem.h but provides no
+        # definitions.  librknnrt.so v2.3.x calls RKNPU_MEM_CREATE to allocate
+        # NPU memory for model weights and command buffers.
+        #
+        # Bug 55: dma_alloc_coherent() (the rev-2 implementation) fails for
+        # large RKLLM model allocations (e.g. 2.4 GB for gemma2:2b) in IOMMU
+        # translated mode.  Fix: use dma_alloc_noncontiguous() which allocates
+        # scatter pages mapped into a single contiguous IOVA by the IOMMU.
+        # dma_vmap_noncontiguous() provides the kernel VA for rknpu_job.c.
         cp /pkg/files/rknpu_mem.c src/rknpu_mem.c
 
         # Bug 35: rknpu_gem_sync_ioctl references rknpu_dev->fake_dev in the
