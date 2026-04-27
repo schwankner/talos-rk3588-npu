@@ -11,7 +11,6 @@ import (
 	"syscall"
 	"time"
 
-
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	v1beta1 "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
@@ -45,10 +44,31 @@ const (
 	// cdiSpecDest is the path where the CDI spec is written at startup.
 	// Talos containerd is configured with cdi_spec_dirs = ['/run/cdi'] only;
 	// the system extension installs the spec at /etc/cdi/ (persistent) but
-	// containerd does not watch that path.  The device plugin copies the spec
-	// to /var/run/cdi/ (= /run/cdi/) on every start so it survives reboots.
-	cdiSpecSrc  = "/etc/cdi/rockchip-npu.yaml"
+	// containerd does not watch that path, and /etc/cdi is an overlay dir
+	// not directly accessible from the kubelet host-path volume namespace.
+	// The spec content is embedded here so no host file access is required;
+	// the plugin writes it to /var/run/cdi/ (= /run/cdi/) on every start.
 	cdiSpecDest = "/var/run/cdi/rockchip-npu.yaml"
+
+	// cdiSpec is the static CDI spec content, matching the file installed
+	// by the rockchip-rknpu system extension at /etc/cdi/rockchip-npu.yaml.
+	// Must be kept in sync with rockchip-rknpu/files/rockchip-npu.cdi.yaml.
+	cdiSpec = `cdiVersion: "0.6.0"
+kind: "rockchip.com/npu"
+devices:
+  - name: "0"
+    containerEdits:
+      deviceNodes:
+        - path: "/dev/rknpu"
+          permissions: "rw"
+      mounts:
+        - hostPath: "/usr/lib/librknnrt.so"
+          containerPath: "/usr/lib/librknnrt.so"
+          options: ["ro", "bind"]
+        - hostPath: "/dev/dma_heap/system"
+          containerPath: "/dev/dma_heap/system"
+          options: ["rw", "bind"]
+`
 
 	pollInterval = 10 * time.Second
 )
@@ -57,20 +77,18 @@ const (
 // CDI spec management
 // ---------------------------------------------------------------------------
 
-// writeCDISpec copies the CDI spec from the system extension path (/etc/cdi/)
-// to the containerd CDI watch directory (/var/run/cdi/).  Talos containerd is
-// configured with cdi_spec_dirs = ['/run/cdi']; the extension installs the
-// spec under /etc/cdi/ which is persistent but not watched.  This copy must
-// be performed on every start because /run/cdi is a tmpfs cleared on reboot.
+// writeCDISpec writes the embedded CDI spec to the containerd CDI watch
+// directory (/var/run/cdi/).  Talos containerd is configured with
+// cdi_spec_dirs = ['/run/cdi']; the system extension installs the spec at
+// /etc/cdi/ (persistent), but /etc/cdi is an overlay dir not reachable
+// via kubelet hostPath volumes, and /run/cdi is a tmpfs cleared on reboot.
+// Writing the spec from the embedded constant on every start is the simplest
+// approach that works without any machine config changes.
 func writeCDISpec() error {
-	data, err := os.ReadFile(cdiSpecSrc)
-	if err != nil {
-		return fmt.Errorf("read %s: %w", cdiSpecSrc, err)
-	}
 	if err := os.MkdirAll(filepath.Dir(cdiSpecDest), 0o755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", filepath.Dir(cdiSpecDest), err)
 	}
-	if err := os.WriteFile(cdiSpecDest, data, 0o644); err != nil {
+	if err := os.WriteFile(cdiSpecDest, []byte(cdiSpec), 0o644); err != nil {
 		return fmt.Errorf("write %s: %w", cdiSpecDest, err)
 	}
 	return nil
