@@ -306,23 +306,18 @@ case ModeUpgrade:
 
 ## Bug 14: sbc-rockchip overlay installer silently discards --system-extension-image flags
 
-**Symptom:** After upgrading with a custom installer built with `--system-extension-image` flags and `--overlay-image sbc-rockchip --overlay-name turingrk1`, the node boots with only the schematic extension loaded. `talosctl get extensions` shows no rknpu or rknn-libs. `dmesg` shows only two loop devices at boot (schematic + rootfs); no extension squashfs loop devices appear. `modprobe rknpu` fails with "module not found".
+**Status: ✅ Resolved in Talos 1.13.0-rc.0 (2026-04-27)**
 
-**Root cause:** The `sbc-rockchip` overlay installer (v0.2.0) intercepts `--system-extension-image` flags in the Talos imager profile. Instead of following the standard Talos code path that embeds extension squashfs files inside the UKI's initramfs CPIO, it places them under `overlayInstaller.imageRefs` in the imager profile. The UKI built by this path contains only the schematic squashfs and the main Talos rootfs squashfs in its initramfs — no extension squashfs files are ever embedded.
+**Symptom:** After upgrading with a custom installer built with `--system-extension-image` flags and `--overlay-image sbc-rockchip --overlay-name turingrk1`, the node boots with only the schematic extension loaded. `talosctl get extensions` shows no rknpu or rknn-libs. At boot, only loop0 (schematic, 4 KB) and loop1 (rootfs, ~68 MB) are created — confirming the initramfs has no extension squashfs.
 
-**Confirmation:** Inspecting the installer image layers via the OCI registry API shows that `ghcr.io/siderolabs/sbc-rockchip:v0.2.0` in layer 2 contains only `usr/install/arm64/vmlinuz.efi` and `usr/install/arm64/systemd-boot.efi`. No `*.sqsh` files exist in any layer. At boot, only loop0 (schematic, 4 KB) and loop1 (rootfs, ~68 MB) are created — confirming the initramfs has no extension squashfs.
+**Root cause (historical):** In the Talos version where this was originally encountered, the imager's profile-merging path conflated the overlay profile with the extension list. Extension squashfs files were not embedded in the UKI initramfs when `--overlay-image` was also present.
 
-**Solution:** Two-pass imager build in `scripts/build-installer.sh`:
+**Resolution:** Talos 1.13 imager handles `--overlay-image` and `--system-extension-image` through entirely independent code paths:
+- `handleOverlay()` — pulls overlay, registers installer binary; does not touch `SystemExtensions`
+- `buildInitramfs()` — reads `prof.Input.SystemExtensions` and embeds squashfs files; runs unconditionally
+- `outInstaller()` — artifacts layer (vmlinuz.efi with extensions) and overlay layer are appended separately
 
-1. **Pass 1** (no overlay, with extensions): Run the imager with `--system-extension-image` flags but WITHOUT `--overlay-image`. The standard Talos imager code path correctly embeds extension squashfs files inside the UKI initramfs. Also pass all `--extra-kernel-arg` flags so the cmdline is baked into this UKI.
-
-2. **Pass 2** (with overlay, no extensions): Run the imager with `--overlay-image sbc-rockchip --overlay-name turingrk1` but WITHOUT `--system-extension-image`. Produces the board-support artifacts (U-Boot, DTBs, overlay installer binary).
-
-3. **Combine**: Extract `vmlinuz.efi` from the pass-1 installer (has extension squashfs + correct cmdline in initramfs). Build a new image `FROM` the pass-2 installer (has board support), replacing its bare `vmlinuz.efi` with the extension-bearing one via `COPY`.
-
-The combined installer has both extension squashfs files embedded in the UKI initramfs AND the correct U-Boot/DTB board support artifacts.
-
-**Note:** This is a bug in sbc-rockchip v0.2.0. A future sbc-rockchip release may fix this; at that point the two-pass workaround can be simplified back to a single imager invocation.
+Passing both flags to a single `imager installer` invocation produces a correct installer: extensions embedded in UKI initramfs AND U-Boot/DTB overlay artifacts present. The two-pass workaround in `build-installer.sh` has been removed (2026-04-27).
 
 ---
 

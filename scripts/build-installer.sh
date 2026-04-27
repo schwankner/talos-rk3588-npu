@@ -1,22 +1,10 @@
 #!/usr/bin/env bash
 # Build a custom Talos installer image for RK3588 NPU.
 #
-# The sbc-rockchip overlay installer (v0.2.0) intercepts --system-extension-image
-# flags and does NOT embed the extension squashfs files inside the UKI initramfs
-# (Bug 14).  We work around this with a two-pass build:
-#
-#   Pass 1 (no overlay, with extensions):
-#     The standard Talos imager code path embeds extension squashfs files inside
-#     the UKI initramfs.  This produces a vmlinuz.efi with the correct extensions.
-#
-#   Pass 2 (with overlay, no extensions):
-#     The sbc-rockchip overlay installer writes U-Boot, DTBs, and configures GRUB
-#     for the turingrk1 board layout.  Without this, talosctl upgrade writes the
-#     kernel to the wrong EFI partition path and the node hangs at GRUB.
-#
-#   Combine:
-#     Take the board-support artifacts from Pass 2 (GRUB, U-Boot, DTBs) and
-#     replace its bare vmlinuz.efi with the extension-bearing one from Pass 1.
+# Single-pass build: the Talos 1.13 imager correctly handles --overlay-image and
+# --system-extension-image together.  Extensions are embedded in the UKI initramfs
+# CPIO independently of the overlay; the sbc-rockchip turingrk1 overlay provides
+# U-Boot and DTB artifacts without intercepting extensions (Bug 14 resolved).
 #
 # Custom kernel required (Bug 10 / Bug 11 / Bug 16).  The module signing key is
 # ephemeral: it is generated during the bldr kernel-build stage and never committed
@@ -178,24 +166,26 @@ fi
 log "Custom imager built: ${CUSTOM_IMAGER_REF}"
 
 # ---------------------------------------------------------------------------
-# Pass 1: Build UKI with extensions embedded (no overlay)
+# Build installer: overlay + extensions in a single imager pass
 #
-# The standard imager path embeds all --system-extension-image squashfs files
-# and the schematic inside the UKI initramfs CPIO.  The sbc-rockchip overlay
-# intercepts these flags and discards them (Bug 14), so we must run without
-# --overlay-image to get the correct initramfs.
+# Talos 1.13 correctly handles --overlay-image and --system-extension-image
+# together.  The overlay path (handleOverlay) and the extension path
+# (buildInitramfs) are independent in the imager; extensions are embedded
+# in the UKI initramfs before the overlay artifacts layer is appended.
 # ---------------------------------------------------------------------------
 
-log "Pass 1: building UKI with extensions (no overlay)..."
+log "Building installer (overlay + extensions)..."
 
-UKI_EXT_OUT="${WORK_DIR}/uki-ext-out"
-mkdir -p "${UKI_EXT_OUT}"
+INSTALLER_OUT="${WORK_DIR}/installer-out"
+mkdir -p "${INSTALLER_OUT}"
 
 "${CONTAINER_RUNTIME}" run --rm \
-    -v "${UKI_EXT_OUT}:/out" \
+    -v "${INSTALLER_OUT}:/out" \
     "${CUSTOM_IMAGER_REF}" \
     installer \
     --arch arm64 \
+    --overlay-image ghcr.io/siderolabs/sbc-rockchip:v0.2.0 \
+    --overlay-name turingrk1 \
     --system-extension-image "ghcr.io/${REGISTRY#ghcr.io/}/rockchip-rknpu:${RKNPU_VERSION}-${KERNEL_VERSION}" \
     --system-extension-image "ghcr.io/${REGISTRY#ghcr.io/}/rockchip-rknn-libs:${RKNN_RUNTIME_VERSION}-${KERNEL_VERSION}" \
     --extra-kernel-arg cma=128MB \
@@ -205,72 +195,20 @@ mkdir -p "${UKI_EXT_OUT}"
     --extra-kernel-arg talos.dashboard.disabled=1 \
     2>&1
 
-log "Loading Pass 1 installer image..."
-UKI_EXT_LOAD=$("${CONTAINER_RUNTIME}" load -i "${UKI_EXT_OUT}/installer-arm64.tar" 2>&1)
-echo "${UKI_EXT_LOAD}"
-UKI_EXT_IMAGE=$(echo "${UKI_EXT_LOAD}" | grep -oE 'Loaded image[^:]*: \S+' | awk '{print $NF}' | head -1)
-if [ -z "${UKI_EXT_IMAGE}" ]; then
-    echo "ERROR: Could not determine loaded image name from: ${UKI_EXT_LOAD}" >&2
+log "Loading installer image..."
+INSTALLER_LOAD=$("${CONTAINER_RUNTIME}" load -i "${INSTALLER_OUT}/installer-arm64.tar" 2>&1)
+echo "${INSTALLER_LOAD}"
+INSTALLER_LOADED=$(echo "${INSTALLER_LOAD}" | grep -oE 'Loaded image[^:]*: \S+' | awk '{print $NF}' | head -1)
+if [ -z "${INSTALLER_LOADED}" ]; then
+    echo "ERROR: Could not determine loaded image name from: ${INSTALLER_LOAD}" >&2
     exit 1
 fi
-UKI_EXT_REF="uki-ext-installer:${TALOS_VERSION#v}"
-"${CONTAINER_RUNTIME}" tag "${UKI_EXT_IMAGE}" "${UKI_EXT_REF}"
-log "Pass 1 installer tagged: ${UKI_EXT_REF}"
-
-# ---------------------------------------------------------------------------
-# Pass 2: Build overlay installer (no extensions)
-#
-# Produces the board-support artifacts (U-Boot, DTBs, GRUB config) that the
-# turingrk1 board requires.  The vmlinuz.efi produced here has no extensions
-# in its initramfs; it will be replaced with the Pass 1 UKI in the next step.
-# ---------------------------------------------------------------------------
-
-log "Pass 2: building overlay installer (no extensions)..."
-
-OVERLAY_OUT="${WORK_DIR}/overlay-out"
-mkdir -p "${OVERLAY_OUT}"
-
-"${CONTAINER_RUNTIME}" run --rm \
-    -v "${OVERLAY_OUT}:/out" \
-    "${CUSTOM_IMAGER_REF}" \
-    installer \
-    --arch arm64 \
-    --overlay-image ghcr.io/siderolabs/sbc-rockchip:v0.2.0 \
-    --overlay-name turingrk1 \
-    2>&1
-
-log "Loading Pass 2 installer image..."
-OVERLAY_LOAD=$("${CONTAINER_RUNTIME}" load -i "${OVERLAY_OUT}/installer-arm64.tar" 2>&1)
-echo "${OVERLAY_LOAD}"
-OVERLAY_IMAGE=$(echo "${OVERLAY_LOAD}" | grep -oE 'Loaded image[^:]*: \S+' | awk '{print $NF}' | head -1)
-if [ -z "${OVERLAY_IMAGE}" ]; then
-    echo "ERROR: Could not determine loaded image name from: ${OVERLAY_LOAD}" >&2
-    exit 1
-fi
-OVERLAY_REF="overlay-installer:${TALOS_VERSION#v}"
-"${CONTAINER_RUNTIME}" tag "${OVERLAY_IMAGE}" "${OVERLAY_REF}"
-log "Pass 2 overlay installer tagged: ${OVERLAY_REF}"
-
-# ---------------------------------------------------------------------------
-# Combine: overlay installer base + extension-bearing UKI
-#
-# Extract vmlinuz.efi from Pass 1 (extensions embedded in initramfs CPIO) and
-# replace the bare vmlinuz.efi in the Pass 2 image with it.
-# ---------------------------------------------------------------------------
-
-log "Combining: replacing vmlinuz.efi in overlay installer with extension-bearing UKI..."
+INSTALLER_REF="installer:${TALOS_VERSION#v}"
+"${CONTAINER_RUNTIME}" tag "${INSTALLER_LOADED}" "${INSTALLER_REF}"
+log "Installer tagged: ${INSTALLER_REF}"
 
 COMBINED_CTX="${WORK_DIR}/combined-ctx"
 mkdir -p "${COMBINED_CTX}"
-
-# Extract vmlinuz.efi by creating a temporary container.
-# chmod 644: the in-container file mode is 0400 (Talos installer images); the
-# subsequent docker cp into the patch container would fail with "permission denied".
-EXTRACT_CID=$("${CONTAINER_RUNTIME}" create "${UKI_EXT_REF}")
-"${CONTAINER_RUNTIME}" cp "${EXTRACT_CID}:/usr/install/arm64/vmlinuz.efi" "${COMBINED_CTX}/vmlinuz.efi"
-"${CONTAINER_RUNTIME}" rm "${EXTRACT_CID}"
-chmod 644 "${COMBINED_CTX}/vmlinuz.efi"
-log "Extracted vmlinuz.efi ($(du -sh "${COMBINED_CTX}/vmlinuz.efi" | cut -f1)) from ${UKI_EXT_REF}"
 
 # ---------------------------------------------------------------------------
 # DTB patch: replace per-core rknn-core nodes with vendor rknpu node
@@ -286,8 +224,8 @@ log "Extracted vmlinuz.efi ($(du -sh "${COMBINED_CTX}/vmlinuz.efi" | cut -f1)) f
 # if the sbc-rockchip version is updated.
 # ---------------------------------------------------------------------------
 
-log "Extracting rk3588-turing-rk1.dtb from overlay installer..."
-DTB_EXTRACT_CID=$("${CONTAINER_RUNTIME}" create "${OVERLAY_REF}")
+log "Extracting rk3588-turing-rk1.dtb from installer..."
+DTB_EXTRACT_CID=$("${CONTAINER_RUNTIME}" create "${INSTALLER_REF}")
 "${CONTAINER_RUNTIME}" cp \
     "${DTB_EXTRACT_CID}:/overlay/artifacts/arm64/dtb/rockchip/rk3588-turing-rk1.dtb" \
     "${COMBINED_CTX}/rk3588-turing-rk1.dtb"
@@ -411,40 +349,36 @@ log "Patching rk3588-turing-rk1.dtb (renaming rknn-core compat, adding rknpu nod
                -I dts -O dtb -o /work/rk3588-turing-rk1-patched.dtb 2>/dev/null"
 log "DTB patched: $(du -sh "${COMBINED_CTX}/rk3588-turing-rk1-patched.dtb" | cut -f1)"
 
-COMBINED_REF="combined-installer:${TALOS_VERSION#v}"
+PATCHED_REF="patched-installer:${TALOS_VERSION#v}"
 if [ "${CONTAINER_RUNTIME}" = "docker" ]; then
     # docker buildx uses an isolated image store (docker-container driver) and
     # cannot see images loaded into the Docker daemon via `docker load`.  Use
     # `docker commit` against the daemon directly so no registry round-trip is
     # needed and no buildx image-store isolation issue arises.
-    PATCH_CID=$(docker create "${OVERLAY_REF}")
-    docker cp "${COMBINED_CTX}/vmlinuz.efi" "${PATCH_CID}:/usr/install/arm64/vmlinuz.efi"
+    PATCH_CID=$(docker create "${INSTALLER_REF}")
     docker cp "${COMBINED_CTX}/rk3588-turing-rk1-patched.dtb" \
         "${PATCH_CID}:/overlay/artifacts/arm64/dtb/rockchip/rk3588-turing-rk1.dtb"
-    docker commit "${PATCH_CID}" "${COMBINED_REF}"
+    docker commit "${PATCH_CID}" "${PATCHED_REF}"
     docker rm "${PATCH_CID}"
 else
     cat > "${COMBINED_CTX}/Dockerfile" <<DOCKERFILE
-FROM ${OVERLAY_REF}
-# Replace the bare overlay-installer UKI (no extensions in initramfs) with the
-# one built in Pass 1 (standard imager path, extensions embedded as squashfs).
-COPY vmlinuz.efi /usr/install/arm64/vmlinuz.efi
+FROM ${INSTALLER_REF}
 # Replace the sbc-rockchip DTB with the patched version that has the vendor
 # rknpu node (replaces per-core rknn-core nodes for w568w/rknpu-module).
 COPY rk3588-turing-rk1-patched.dtb /overlay/artifacts/arm64/dtb/rockchip/rk3588-turing-rk1.dtb
 DOCKERFILE
     podman build \
         --platform linux/arm64 \
-        --tag "${COMBINED_REF}" \
+        --tag "${PATCHED_REF}" \
         "${COMBINED_CTX}"
 fi
-log "Combined installer built: ${COMBINED_REF}"
+log "Patched installer built: ${PATCHED_REF}"
 
 log "Pushing installer to ${INSTALLER_IMAGE}..."
 # Tag and push to an EXISTING package (installer-base) with a new tag — this
 # avoids GHCR org-level restrictions that block creating new packages via
 # GITHUB_TOKEN.
-"${CONTAINER_RUNTIME}" tag "${COMBINED_REF}" "${INSTALLER_IMAGE}"
+"${CONTAINER_RUNTIME}" tag "${PATCHED_REF}" "${INSTALLER_IMAGE}"
 "${CONTAINER_RUNTIME}" push "${INSTALLER_IMAGE}"
 
 log "Done! Installer pushed: ${INSTALLER_IMAGE}"
