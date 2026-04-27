@@ -81,7 +81,7 @@ CDI device plugin (rockchip.com/npu: "1" in resources.limits)
 │                                                              │
 │  DaemonSet:                                                  │
 │  └── rk3588-npu-device-plugin                               │
-│      ├── advertises: rockchip.com/npu: "1"                  │
+│      ├── advertises: rockchip.com/npu: "3"  (1 slot/core)   │
 │      └── writes: /var/run/cdi/rockchip-npu.yaml             │
 └──────────────────────────────────────────────────────────────┘
                           │
@@ -90,9 +90,6 @@ CDI device plugin (rockchip.com/npu: "1" in resources.limits)
 │  Pod                                                         │
 │                                                              │
 │  spec:                                                       │
-│    hostUsers: false                                          │
-│    securityContext:                                          │
-│      procMount: Unmasked                                     │
 │    containers:                                               │
 │      resources:                                              │
 │        limits:                                               │
@@ -379,8 +376,10 @@ spec:
 
 ### Resource name
 
-`rockchip.com/npu` — advertises exactly 1 unit per node. The RK3588 NPU is a
-single shared resource (multiple pods may serialize, not parallelize).
+`rockchip.com/npu` — advertises **3 units per node** (one per physical NPU core).
+Up to 3 pods can run inference concurrently; the RKNN runtime and kernel driver
+distribute work across CORE_0/1/2 internally. All 3 slots map to the same
+`/dev/rknpu` device node — there is no per-core isolation at the kernel level.
 
 ### Device discovery
 

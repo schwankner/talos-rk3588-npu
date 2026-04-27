@@ -18,7 +18,13 @@ import (
 
 const (
 	resourceName = "rockchip.com/npu"
-	deviceID     = "rknpu0"
+
+	// npuCores is the number of virtual device slots advertised to Kubernetes.
+	// The RK3588 NPU has 3 physical cores; all slots map to the same /dev/rknpu
+	// device node. The RKNN runtime and kernel driver handle concurrent access
+	// and distribute work across cores internally, so up to npuCores pods can
+	// run inference simultaneously without blocking each other.
+	npuCores = 3
 
 	// rknpu.ko registers a misc device at /dev/rknpu when
 	// CONFIG_ROCKCHIP_RKNPU_DMA_HEAP is set (our build config).
@@ -28,6 +34,8 @@ const (
 
 	// CDI device reference — containerd looks up this name in the CDI spec
 	// installed by the rockchip-rknpu system extension at /etc/cdi/rockchip-npu.yaml.
+	// All virtual slots reference the same CDI entry because they share the
+	// single /dev/rknpu device node.
 	cdiDeviceRef = "rockchip.com/npu=0"
 
 	kubeletSock = "/var/lib/kubelet/device-plugins/kubelet.sock"
@@ -70,10 +78,25 @@ func (p *npuPlugin) GetDevicePluginOptions(_ context.Context, _ *v1beta1.Empty) 
 // this gives a 30-second grace window before health transitions to Unhealthy.
 const unhealthyThreshold = 3
 
+// npuDevices builds the list of virtual device slots. All npuCores slots map
+// to the same physical /dev/rknpu node and share the same health status.
+func npuDevices(health string) []*v1beta1.Device {
+	devs := make([]*v1beta1.Device, npuCores)
+	for i := range devs {
+		devs[i] = &v1beta1.Device{
+			ID:     fmt.Sprintf("rknpu%d", i),
+			Health: health,
+		}
+	}
+	return devs
+}
+
 // ListAndWatch polls for /dev/rknpu on every tick so health status reflects
-// module load/unload without requiring a pod restart.
+// module load/unload without requiring a pod restart. It advertises npuCores
+// virtual slots so Kubernetes can schedule up to npuCores pods concurrently;
+// the RKNN runtime distributes work across the 3 NPU cores internally.
 func (p *npuPlugin) ListAndWatch(_ *v1beta1.Empty, stream v1beta1.DevicePlugin_ListAndWatchServer) error {
-	log.Println("ListAndWatch: starting")
+	log.Printf("ListAndWatch: starting (%d virtual slots)", npuCores)
 	var failCount int
 
 	for {
@@ -94,7 +117,7 @@ func (p *npuPlugin) ListAndWatch(_ *v1beta1.Empty, stream v1beta1.DevicePlugin_L
 		}
 
 		if err := stream.Send(&v1beta1.ListAndWatchResponse{
-			Devices: []*v1beta1.Device{{ID: deviceID, Health: health}},
+			Devices: npuDevices(health),
 		}); err != nil {
 			log.Printf("ListAndWatch: send error: %v", err)
 			return err
@@ -226,7 +249,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("/dev/rknpu not found after 60 s: %v", err)
 	}
-	log.Printf("Discovered NPU: %s", rknpuMiscDev)
+	log.Printf("Discovered NPU: %s — advertising %d virtual slots", rknpuMiscDev, npuCores)
 
 	// CDI spec is provided as a static file by the rockchip-rknpu system extension
 	// at /etc/cdi/rockchip-npu.yaml. Talos 1.13 enables CDI in containerd by
