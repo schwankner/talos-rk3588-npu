@@ -83,8 +83,11 @@ jobs:
           # the same group name would rename /usr/bin/python3 → /usr/bin/python).
           RUN ln -sf /usr/bin/python3 /usr/bin/python
 
-          # Fix setuptools version to prevent: No module named 'pkg_resources'
-          RUN python3 -m pip --no-cache-dir install "setuptools<82.0.0" --break-system-packages
+          # Upgrade pip first: Ubuntu 24.04 ships pip 24.0 which cannot parse
+          # the 'file:./...' local-wheel URL format in pyproject.toml.
+          # Also fix setuptools version to prevent: No module named 'pkg_resources'
+          RUN python3 -m pip --no-cache-dir install --upgrade pip --break-system-packages \
+              && python3 -m pip --no-cache-dir install "setuptools<82.0.0" --break-system-packages
 
           WORKDIR /opt/rkllama
 
