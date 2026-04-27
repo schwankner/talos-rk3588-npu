@@ -83,11 +83,13 @@ jobs:
           # the same group name would rename /usr/bin/python3 → /usr/bin/python).
           RUN ln -sf /usr/bin/python3 /usr/bin/python
 
-          # Upgrade pip first: Ubuntu 24.04 ships pip 24.0 which cannot parse
-          # the 'file:./...' local-wheel URL format in pyproject.toml.
-          # Also fix setuptools version to prevent: No module named 'pkg_resources'
-          RUN python3 -m pip --no-cache-dir install --upgrade pip --break-system-packages \
-              && python3 -m pip --no-cache-dir install "setuptools<82.0.0" --break-system-packages
+          # Ubuntu 24.04's apt-installed pip 24.0 lacks a RECORD file, so
+          # 'pip install --upgrade pip' fails with "Cannot uninstall pip 24.0".
+          # Re-install pip via get-pip.py which handles the debian case and
+          # installs a fresh pip into /usr/local without touching the apt one.
+          # Then fix setuptools to prevent: No module named 'pkg_resources'
+          RUN curl -fsSL https://bootstrap.pypa.io/get-pip.py | python3 \
+              && pip3 --no-cache-dir install "setuptools<82.0.0"
 
           WORKDIR /opt/rkllama
 
