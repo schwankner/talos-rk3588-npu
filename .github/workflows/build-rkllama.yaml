@@ -78,9 +78,10 @@ jobs:
                  ffmpeg libsm6 libxext6 \
               && rm -rf /var/cache/apt/archives /var/lib/apt/lists/*
 
-          # Make python3.12 the default python3
-          RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1 \
-              && update-alternatives --install /usr/bin/python python3 /usr/bin/python3.12 1
+          # python3 already points to python3.12 after package install.
+          # Add a bare 'python' alias via symlink (update-alternatives with
+          # the same group name would rename /usr/bin/python3 → /usr/bin/python).
+          RUN ln -sf /usr/bin/python3 /usr/bin/python
 
           # Fix setuptools version to prevent: No module named 'pkg_resources'
           RUN python3 -m pip --no-cache-dir install "setuptools<82.0.0" --break-system-packages
