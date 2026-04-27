@@ -285,20 +285,22 @@ Arguments passed via `--extra-kernel-arg` are embedded in the UKI cmdline at ima
 
 ## Bug 13: turingrk1 sbc-rockchip overlay repartitions eMMC during `talosctl upgrade`, destroying STATE and META
 
+**Status: ✅ Resolved in Talos 1.13.0-rc.0 (2026-04-27)**
+
 **Symptom:** After `talosctl upgrade --preserve --image <custom-installer>`, the node reboots but Talos enters an install loop — it has no machine config, no cluster identity, and no installed extensions. `talosctl disks` on the node shows the eMMC has been completely repartitioned.
 
-**Root cause:** The `ghcr.io/siderolabs/sbc-rockchip` overlay for `turingrk1` contains an `installers/turingrk1` binary that uses `*overlay.PartitionOptions`. This signals to the Talos installer that the overlay needs to control the partition layout. The Talos installer honors this by performing a **full disk repartition** regardless of the `--preserve` flag. Partitions p4 (META) and p5 (STATE) are wiped, destroying the machine config and cluster secrets.
+**Root cause:** The `ghcr.io/siderolabs/sbc-rockchip` overlay for `turingrk1` returns `overlay.PartitionOptions{Offset: 2048 * 10}` from `GetOptions()` to reserve 10 MB before the first GPT partition for U-Boot. In older Talos versions this caused the installer to repartition the disk even during upgrade, wiping META and STATE.
 
-**Why `--preserve` doesn't help:** `--preserve` prevents the installer from wiping the STATE filesystem contents, but only if STATE survives repartitioning. When the partition table itself is rewritten (as the turingrk1 overlay demands), STATE is destroyed before `--preserve` logic can act.
+**Resolution:** Talos 1.13 changed `cmd/installer/pkg/install/install.go` so that `createPartitions()` returns immediately on `ModeUpgrade` without reading `PartitionOptions`:
 
-**Consequence (compound with Bug 12):** After STATE is wiped, the node has no machine config. On next boot it enters maintenance mode and fetches config from the URL embedded in the UKI cmdline (the schematic's `talos.config=` arg). If that URL points to the wrong config (e.g., an old non-NPU config), the node reinstalls with the wrong installer image, reverting all customization.
+```go
+case ModeUpgrade:
+    return nil, nil  // no partitioning on upgrade
+```
 
-**Mitigation (until overlay is fixed):**
-1. Bake `talos.config=http://<correct-server>/worker.yaml` into the installer via `--extra-kernel-arg` so that even after STATE is wiped, the node fetches the correct config.
-2. Ensure the config server at that URL always serves the current NPU machine config.
-3. Accept that each upgrade is effectively a full reinstall; the node will re-apply config automatically once it can reach the config server.
+`PartitionOptions.Offset` is now only consulted during initial installation (`ModeInstall`) and image creation (`ModeImage`). Upgrades on Talos 1.13+ preserve STATE and META regardless of what the overlay returns from `GetOptions()`.
 
-**Permanent fix (TODO):** Investigate whether a custom overlay without `PartitionOptions` can avoid repartitioning on upgrade while still laying down the correct U-Boot + DTB for the Turing RK1.
+**Verification:** Multiple `talosctl upgrade --preserve` runs on the Turing RK1 with Talos 1.13.0-rc.0 completed without repartitioning. STATE and cluster secrets survived all upgrades.
 
 ---
 
@@ -370,7 +372,7 @@ with maintenance mode DHCP will make the node unrecoverable without physical int
 ## Bug 16: NPU installer breaks Ethernet in maintenance mode — node unreachable after upgrade
 
 **Symptom:** After `talosctl upgrade --image <npu-installer>`, the node reboots, enters
-maintenance mode (due to Bug 13 repartitioning) and then never responds to ping or talosctl on
+maintenance mode and then never responds to ping or talosctl on
 any IP address. The UART shows Talos booted successfully and entered maintenance mode, but only
 NTP failures (`network is unreachable`) fill the log indefinitely. No DHCP is obtained. The
 standard `tpi flash` + `apply-config` recovery cycle works fine (standard siderolabs kernel gets
