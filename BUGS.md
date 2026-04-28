@@ -2177,42 +2177,59 @@ single contiguous IOVA window.  Early boot allocations fragment the 4 GB IOVA sp
 `fdab0000.rknpu` device, and a contiguous 2.4 GB IOVA window is not available.  The call
 returns NULL with no error message (silent failure).
 
-**Fix (Rev 2 — current):** Bypass `dma_alloc_noncontiguous()` entirely.  Allocate pages
-individually with `alloc_page(GFP_KERNEL)` — each single-page allocation always succeeds as
-long as there is free RAM — build an `sg_table` with `sg_alloc_table_from_pages()`, then
-call `dma_map_sgtable()`.  Unlike `dma_alloc_noncontiguous()`, `dma_map_sgtable()` maps
-each page independently into the IOVA space (no single contiguous IOVA window required).
-`vmap()` provides the contiguous kernel virtual address for `rknpu_job.c`.
+**Fix (Rev 2 — superseded by Rev 3):** Bypass `dma_alloc_noncontiguous()` entirely.
+Allocate pages individually with `alloc_page(GFP_KERNEL)`, build an `sg_table` with
+`sg_alloc_table_from_pages()`, then call `dma_map_sgtable()`.  Unlike
+`dma_alloc_noncontiguous()`, `dma_map_sgtable()` maps each sg entry independently —
+no single contiguous IOVA window required.  `vmap()` provides the kernel virtual address.
 
-```c
-struct rknpu_mem_buf {
-    struct rknpu_mem_object  mem;     /* MUST be first — cast target in submit */
-    struct device           *dev;
-    struct sg_table          sgt;    /* embedded (not pointer); IOMMU-mapped per-page */
-    struct page            **pages;  /* page array, nr_pages entries */
-    unsigned long            nr_pages;
-};
+**Why Rev 2 also fails (for 2.4 GB):** Two interacting problems:
 
-/* allocate pages one at a time — no physically-contiguous or CMA requirement */
-buf->pages = vmalloc(nr_pages * sizeof(struct page *));
-for (i = 0; i < nr_pages; i++)
-    buf->pages[i] = alloc_page(GFP_KERNEL | __GFP_ZERO);
+1. `sg_alloc_table_from_pages()` coalesces physically-contiguous pages.  On a freshly-booted
+   system the buddy allocator serves 638,208 `alloc_page()` calls from large contiguous runs,
+   producing `nents=2` (two ~1.2 GB chunks) rather than 638,208 individual 4 KB entries.
 
-sg_alloc_table_from_pages(&buf->sgt, buf->pages, nr_pages, 0, size, GFP_KERNEL);
+2. `dma_map_sgtable()` maps each sg entry to its own independent IOVA region.  With `nents=2`
+   those two regions are NOT adjacent.  The NPU hardware uses `base_iova + sequential offsets`
+   to access model weights; beyond the first sg entry it addresses unmapped IOVA.  Additionally,
+   finding a 1.2 GB contiguous IOVA window in a 4 GB IOVA space (32-bit `dma_mask`) fails with
+   `-ENOMEM (-12)`.
 
-/* maps each page individually — no contiguous IOVA window needed */
-dma_map_sgtable(buf->dev, &buf->sgt, DMA_BIDIRECTIONAL, 0);
-
-buf->mem.dma_addr = sg_dma_address(buf->sgt.sgl);   /* IOVA of first page */
-buf->mem.kv_addr  = vmap(buf->pages, nr_pages, VM_MAP, PAGE_KERNEL);
+Kernel log confirming Rev 2 failure:
+```
+rknpu_mem: mapped OK dma_addr=0xfe000000 nents=1  (19 MB — succeeds)
+rknpu_mem: mapped OK dma_addr=0xf8000000 nents=1  (84 MB — succeeds)
+rknpu_mem: dma_map_sgtable failed: -12 (size=2614099968 nents=2 dma_mask=0xffffffff)
 ```
 
-Memory is freed in `rknpu_mem_obj_release()` when the anon fd is closed:
-`vunmap` → `dma_unmap_sgtable` → `sg_free_table` → `__free_page` × N → `vfree(pages)`.
+**Fix (Rev 3 — current):** Two-step solution for large allocations (> 256 MiB):
 
-**Requires:** IOMMU translated mode (SMMUv3 active).  In IOMMU passthrough mode
-`dma_map_sgtable()` would also need a contiguous PA window, but IOMMU translated mode is
-always required for multi-core NPU operation (see Bug 52).
+*Step 1:* widen the DMA mask to 40-bit before the allocation.  The RK3588 SoC and its ARM
+SMMU-500 support 40-bit IOVAs (physical address space is 40-bit).  A 40-bit mask gives a
+1 TB IOVA space; a contiguous 2.4 GB window is trivially available.
+
+*Step 2:* use `dma_alloc_noncontiguous()` (which previously failed under Rev 1 *because*
+the 4 GB IOVA space was too small).  With a 1 TB IOVA space, `iommu_dma_alloc_iova()` finds
+the contiguous window and the call succeeds.  `dma_alloc_noncontiguous()` maps
+physically-scattered pages into a **single contiguous IOVA range** through the IOMMU page
+table, so the NPU hardware sees a flat `[iova, iova + size)` window.
+`dma_vmap_noncontiguous()` provides the contiguous kernel virtual address.
+
+Small allocations (≤ 256 MiB) continue to use the Rev 2 `alloc_page + dma_map_sgtable`
+path; they produce `nents=1` (one physically-contiguous block) and work correctly.
+
+```c
+/* Large allocation path (> 256 MiB) */
+if (*buf->dev->dma_mask < DMA_BIT_MASK(40))
+    dma_set_mask(buf->dev, DMA_BIT_MASK(40));   /* expand IOVA space to 1 TB */
+
+buf->nc_sgt = dma_alloc_noncontiguous(buf->dev, size, DMA_BIDIRECTIONAL, GFP_KERNEL, 0);
+buf->mem.dma_addr = sg_dma_address(buf->nc_sgt->sgl);   /* contiguous IOVA base */
+buf->mem.kv_addr  = dma_vmap_noncontiguous(buf->dev, size, buf->nc_sgt);
+/* teardown: dma_vunmap_noncontiguous() + dma_free_noncontiguous() */
+```
+
+**Requires:** IOMMU translated mode (SMMUv3 active), kernel 6.18+, 40-bit DMA mask support.
 
 **BuildKit cache bypass:** when `force_rebuild=true` is set in the GitHub Actions workflow,
 `build-extensions.sh` now receives `FORCE=true` and passes `--no-cache` to
@@ -2221,7 +2238,7 @@ always required for multi-core NPU operation (see Bug 52).
 so local file changes (e.g. `rknpu_mem.c`) were silently ignored.
 
 **Observed on:** rknpu.ko 0.9.10, librknnrt.so 2.3.2, Talos 1.13.0-rc.0 /
-kernel 6.18.22-talos, Turing RK1 (RK3588). gemma2:2b (2.4 GB) fails without Rev 2.
+kernel 6.18.22-talos, Turing RK1 (RK3588). gemma2:2b (2.4 GB) fails without Rev 3.
 
 ---
 
