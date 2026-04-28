@@ -458,25 +458,37 @@ int rknpu_mem_create_ioctl(struct rknpu_device *rknpu_dev, struct file *file,
 	 */
 	args.obj_addr = (u64)(uintptr_t)&buf->mem;
 	/*
-	 * Always report iommu_domain_id = 0 (the device's initial default
-	 * domain, registered in rknpu_iommu_init as iommu_domains[0] =
-	 * iommu_get_domain_for_dev()).
+	 * Register the requested domain ID as an alias for domain 0 so that
+	 * rknpu_iommu_switch_domain() finds a non-NULL entry and performs a
+	 * harmless detach+reattach rather than allocating a fresh empty
+	 * domain (which would hide all our iommu_map() / dma_map_sgtable()
+	 * page-table entries).
 	 *
-	 * Our iommu_map() / dma_map_sgtable() calls operate on the device's
-	 * current hardware domain, which is domain 0 for the entire lifetime
-	 * of the module.  When librknnrt.so submits a job with domain_id = 0,
-	 * rknpu_iommu_domain_get_and_switch() finds 0 == rknpu_dev->
-	 * iommu_domain_id and returns immediately (no switch), so the NPU
-	 * accesses our mappings in the existing page table.
+	 * librknnrt.so v2.3.x uses a monotonically increasing internal
+	 * counter as iommu_domain_id (e.g. 10 by the time the 2.4 GiB
+	 * model-weight buffer is created) and echoes that counter back to
+	 * librknnrt via this field.  When the subsequent RKNPU_SUBMIT
+	 * specifies the same counter, rknpu_iommu_switch_domain(10) sees
+	 * iommu_domains[10] == iommu_domains[0] == the device's hardware
+	 * default domain, detaches and immediately re-attaches to the same
+	 * domain object (page table pointer unchanged), and the NPU can
+	 * access every entry that iommu_map() wrote.
 	 *
-	 * Without this, copy_to_user would echo back whatever value
-	 * librknnrt sent in the request.  librknnrt v2.3.x passes a
-	 * monotonically increasing domain counter (e.g. 10) which triggers
-	 * rknpu_iommu_switch_domain() → iommu_detach_device() + attach of a
-	 * freshly allocated empty domain → all IOVA mappings disappear →
-	 * task counter: 0.
+	 * iommu_domains[0] is set during probe by rknpu_iommu_init_domain()
+	 * as iommu_get_domain_for_dev(), the same domain our iommu_map()
+	 * calls target.  We only populate the slot once (check for NULL) to
+	 * avoid clobbering any entry that the driver may have set itself.
 	 */
-	args.iommu_domain_id = 0;
+	{
+		int req_id = args.iommu_domain_id;
+		struct iommu_domain *dom0 = rknpu_dev->iommu_domains[0];
+
+		if (req_id > 0 && req_id < RKNPU_MAX_IOMMU_DOMAIN_NUM &&
+		    dom0 && !rknpu_dev->iommu_domains[req_id])
+			rknpu_dev->iommu_domains[req_id] = dom0;
+		/* Echo args.iommu_domain_id back unchanged so librknnrt
+		 * stores the same ID for the subsequent RKNPU_SUBMIT. */
+	}
 
 	if (copy_to_user((void __user *)data, &args, sizeof(args))) {
 		/* fd installed; caller must close to free memory */
