@@ -149,6 +149,29 @@
  * region remain non-overlapping for the typical rkllama/gemma2 workload
  * (~2.8 GB total; cursor tops out at ~0xB5000000, well below 4 GB).
  *
+ * Bug 55 (fix, rev 8): "run task counter: 0" persists even though all
+ * iommu_map() calls succeed.  Root cause: rknpu_mem_create_ioctl was
+ * returning the caller's requested iommu_domain_id unchanged.  librknnrt
+ * calls RKNPU_ACTION/RKNPU_SET_IOMMU_DOMAIN_ID to request domain 10 before
+ * making allocations, then reads back the iommu_domain_id from each
+ * RKNPU_MEM_CREATE response and uses it when submitting jobs via
+ * RKNPU_SUBMIT_TASK.  On Android GKI (CONFIG_NO_GKI), rknpu_iommu_switch_
+ * domain() creates a new IOMMU_DOMAIN_UNMANAGED context and attaches the
+ * device to it; allocations and jobs all live in domain 10.  On Talos
+ * (!CONFIG_NO_GKI) the switch is a no-op stub — the device stays on its
+ * default DMA domain (domain 0) — but domain_id=10 was echoed back to
+ * librknnrt unchanged.  librknnrt therefore submitted every job tagged
+ * iommu_domain_id=10 while rknpu_dev->iommu_domain_id remained 0.
+ * rknpu_job.c logs "job iommu domain id: 10, dev iommu domain id: 0" on
+ * every timeout.  The mismatch did not gate execution (rknpu_iommu_domain_
+ * get_and_switch is also a no-op), but it confused whatever per-domain
+ * bookkeeping the NPU firmware uses, causing it to never signal completion.
+ *
+ * Fix (rev 8): override args.iommu_domain_id = 0 before copy_to_user.
+ * This tells librknnrt that every buffer lives in domain 0, which is the
+ * domain the device actually operates in.  librknnrt then submits jobs with
+ * iommu_domain_id=0, matching rknpu_dev->iommu_domain_id=0.
+ *
  * struct rknpu_mem_buf wraps rknpu_mem_object with the fields needed for
  * teardown.  rknpu_mem_object MUST remain the first member so that
  * (struct rknpu_mem_object *)obj_addr is the same address as
@@ -473,6 +496,16 @@ int rknpu_mem_create_ioctl(struct rknpu_device *rknpu_dev, struct file *file,
 	 * and reads ->kv_addr to locate the command/task array.
 	 */
 	args.obj_addr = (u64)(uintptr_t)&buf->mem;
+	/*
+	 * Bug 55 rev 8: force domain 0.
+	 *
+	 * rknpu_iommu_switch_domain() is a no-op stub on Talos (!CONFIG_NO_GKI).
+	 * The device always uses its default DMA domain (domain 0).  All buffers
+	 * are mapped in domain 0 via iommu_map(iommu_get_domain_for_dev()).
+	 * Override any domain the caller requested so librknnrt submits jobs with
+	 * iommu_domain_id=0, matching rknpu_dev->iommu_domain_id=0.
+	 */
+	args.iommu_domain_id = 0;
 
 	if (copy_to_user((void __user *)data, &args, sizeof(args))) {
 		/* fd installed; caller must close to free memory */
