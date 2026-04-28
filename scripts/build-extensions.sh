@@ -163,7 +163,16 @@ build_rknpu() {
     local tag="${RKNPU_VERSION}-${KERNEL_VERSION}"
     local image="${REGISTRY}/rockchip-rknpu:${tag}"
 
+    # When FORCE=true, bypass the BuildKit registry layer cache entirely.
+    # --cache-from alone is not enough: force_rebuild only skips the image-
+    # existence check, but BuildKit still serves every layer from the remote
+    # cache and the runner never sees our local file changes.  --no-cache
+    # forces BuildKit to re-execute every RUN/COPY instruction from scratch.
+    local no_cache_flag=()
+    [[ "${FORCE:-false}" == "true" ]] && no_cache_flag=("--no-cache")
+
     docker buildx build \
+        "${no_cache_flag[@]}" \
         --builder "${BUILDER_NAME}" \
         --file "${PKGS_WORK_DIR}/pkgs/Pkgfile" \
         --target rockchip-rknpu \

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * rknpu_mem.c — NPU memory allocation using the kernel DMA non-contiguous API.
+ * rknpu_mem.c — NPU memory allocation via manual scatter-gather + DMA mapping.
  *
  * Bug 47 (initial): rk_dma_heap_find("rk-dma-heap-cma") returns NULL on
  * mainline 6.18 (Rockchip BSP CMA heap absent), and the Bug 36 fallback
@@ -25,26 +25,24 @@
  * Return the address of the embedded rknpu_mem_object as obj_addr so the
  * submit path dereferences a valid, correctly-populated struct.
  *
- * Bug 55 (fix): dma_alloc_coherent() fails for large RKLLM model buffers
- * (>= ~1 GB) under IOMMU translated mode.  librknnrt.so calls RKNPU_MEM_CREATE
- * for each model weight tensor; the gemma2:2b model requires a single 2.4 GB
- * allocation that dma_alloc_coherent() cannot satisfy (ENOMEM returned even
- * with 26 GB free RAM) because dma_alloc_coherent requires either physically
- * contiguous memory or a compatible IOMMU remap path that may still fail for
- * large orders.
+ * Bug 55 (fix, rev 2): dma_alloc_noncontiguous() silently returns NULL on
+ * kernel 6.18.22 / ARM SMMUv3 for the rknpu device even with abundant free
+ * RAM.  Root cause: iommu_dma_ops.alloc_noncontiguous calls
+ * iommu_dma_alloc_pages() which uses dma_alloc_pages() internally; under the
+ * ARM SMMUv3 translated-mode domain for fdab0000.rknpu, iova_alloc() fails to
+ * find a contiguous 2.4 GB window in the device's IOVA space (the device DMA
+ * mask limits the IOVA range to 4 GB, and early boot allocations fragment it).
  *
- * Fix: switch to dma_alloc_noncontiguous() which allocates scatter pages and
- * maps them into a SINGLE CONTIGUOUS IOVA region via the IOMMU.  The NPU
- * hardware sees a contiguous DMA address range (IOVA) regardless of how the
- * physical pages are laid out.  dma_vmap_noncontiguous() provides the
- * contiguous kernel virtual address (kv_addr) that rknpu_job.c needs.
- *
- * Requires: IOMMU translated mode (iommu.passthrough=1 must NOT be set).
- * With IOMMU passthrough, dma_alloc_noncontiguous() falls back to a
- * physically-contiguous path which would again fail for 2.4 GB.
+ * Fix (rev 2): bypass dma_alloc_noncontiguous() entirely.  Allocate physical
+ * pages individually with alloc_page(GFP_KERNEL) — always succeeds given free
+ * RAM — then build an sg_table from those pages and call dma_map_sgtable() to
+ * obtain the IOVA mapping.  dma_map_sgtable() allocates individual 4 KB IOVA
+ * slots rather than one contiguous window, so the IOVA allocator's contiguous-
+ * range constraint does not apply.  vmap() provides the contiguous kernel
+ * virtual address (kv_addr) for rknpu_job.c.
  *
  * struct rknpu_mem_buf wraps rknpu_mem_object with the fields needed for
- * DMA teardown.  rknpu_mem_object MUST remain the first member so that
+ * teardown.  rknpu_mem_object MUST remain the first member so that
  * (struct rknpu_mem_object *)obj_addr is the same address as
  * (struct rknpu_mem_buf *)obj_addr.
  */
@@ -57,6 +55,7 @@
 #include <linux/scatterlist.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
+#include <linux/vmalloc.h>
 
 #include "include/rknpu_drv.h"
 #include "include/rknpu_mem.h"
@@ -70,25 +69,46 @@
  * Placing mem first makes (struct rknpu_mem_object *)obj_addr == &buf->mem.
  */
 struct rknpu_mem_buf {
-	struct rknpu_mem_object  mem;	/* MUST be first — cast target in submit */
-	struct device		*dev;	/* device for DMA ops */
-	struct sg_table		*sgt;	/* scatter-gather table (IOMMU-mapped) */
+	struct rknpu_mem_object  mem;		/* MUST be first — cast target in submit */
+	struct device		*dev;		/* device for DMA ops */
+	struct sg_table		 sgt;		/* scatter-gather table (IOMMU-mapped) */
+	struct page		**pages;	/* page array (nr_pages entries) */
+	unsigned long		 nr_pages;
 };
 
 static int rknpu_mem_obj_mmap(struct file *filp, struct vm_area_struct *vma)
 {
 	struct rknpu_mem_buf *buf = filp->private_data;
+	struct scatterlist *sg;
+	unsigned long addr = vma->vm_start;
+	int i;
 
-	return dma_mmap_noncontiguous(buf->dev, vma, buf->mem.size, buf->sgt);
+	vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
+
+	for_each_sg(buf->sgt.sgl, sg, buf->sgt.nents, i) {
+		unsigned long len = sg->length;
+
+		if (remap_pfn_range(vma, addr, page_to_pfn(sg_page(sg)),
+				    len, vma->vm_page_prot))
+			return -EAGAIN;
+		addr += len;
+		if (addr >= vma->vm_end)
+			break;
+	}
+	return 0;
 }
 
 static int rknpu_mem_obj_release(struct inode *inode, struct file *filp)
 {
 	struct rknpu_mem_buf *buf = filp->private_data;
+	unsigned long i;
 
-	dma_vunmap_noncontiguous(buf->dev, buf->mem.kv_addr);
-	dma_free_noncontiguous(buf->dev, buf->mem.size, buf->sgt,
-			       DMA_BIDIRECTIONAL);
+	vunmap(buf->mem.kv_addr);
+	dma_unmap_sgtable(buf->dev, &buf->sgt, DMA_BIDIRECTIONAL, 0);
+	sg_free_table(&buf->sgt);
+	for (i = 0; i < buf->nr_pages; i++)
+		__free_page(buf->pages[i]);
+	vfree(buf->pages);
 	kfree(buf);
 	return 0;
 }
@@ -104,7 +124,8 @@ int rknpu_mem_create_ioctl(struct rknpu_device *rknpu_dev, struct file *file,
 {
 	struct rknpu_mem_create args;
 	struct rknpu_mem_buf *buf;
-	int fd;
+	unsigned long i;
+	int ret, fd;
 
 	if (copy_from_user(&args, (void __user *)data, sizeof(args)))
 		return -EFAULT;
@@ -116,57 +137,91 @@ int rknpu_mem_create_ioctl(struct rknpu_device *rknpu_dev, struct file *file,
 	buf->dev	 = rknpu_dev->dev;
 	buf->mem.flags	 = args.flags;
 	buf->mem.size	 = PAGE_ALIGN(args.size);
+	buf->nr_pages	 = buf->mem.size >> PAGE_SHIFT;
 
 	/*
-	 * Bug 55: use dma_alloc_noncontiguous() to allocate scatter pages that
-	 * are mapped into a single contiguous IOVA region by the IOMMU.  This
-	 * succeeds for arbitrarily large buffers (e.g. 2.4 GB model weights)
-	 * where dma_alloc_coherent() fails due to physically-contiguous memory
-	 * requirements.
-	 *
-	 * dma_addr (set below) is sg_dma_address(sgt->sgl): the IOVA base of
-	 * the contiguous IOMMU mapping, which is what the NPU hardware uses.
-	 *
-	 * kv_addr comes from dma_vmap_noncontiguous(): a contiguous kernel
-	 * virtual address range for the scatter pages, needed by rknpu_job.c
-	 * to read the task/command array inside the buffer.
+	 * Bug 55 rev 2: allocate pages individually rather than as one
+	 * contiguous block.  Each alloc_page(GFP_KERNEL) succeeds as long as
+	 * free RAM > 0; no physically-contiguous requirement, no CMA needed.
 	 */
-	buf->sgt = dma_alloc_noncontiguous(buf->dev, buf->mem.size,
-					   DMA_BIDIRECTIONAL, GFP_KERNEL, 0);
-	if (!buf->sgt) {
+	buf->pages = vmalloc(buf->nr_pages * sizeof(struct page *));
+	if (!buf->pages) {
 		kfree(buf);
 		return -ENOMEM;
 	}
 
-	buf->mem.kv_addr = dma_vmap_noncontiguous(buf->dev, buf->mem.size,
-						  buf->sgt);
+	for (i = 0; i < buf->nr_pages; i++) {
+		buf->pages[i] = alloc_page(GFP_KERNEL | __GFP_ZERO);
+		if (!buf->pages[i]) {
+			dev_err(buf->dev,
+				"rknpu_mem: alloc_page failed at %lu/%lu (size=%zu)\n",
+				i, buf->nr_pages, buf->mem.size);
+			ret = -ENOMEM;
+			goto err_free_pages;
+		}
+	}
+
+	ret = sg_alloc_table_from_pages(&buf->sgt, buf->pages, buf->nr_pages,
+					0, buf->mem.size, GFP_KERNEL);
+	if (ret) {
+		dev_err(buf->dev, "rknpu_mem: sg_alloc_table_from_pages failed: %d\n", ret);
+		goto err_free_pages;
+	}
+
+	/*
+	 * Map scatter pages through the IOMMU (ARM SMMUv3) to obtain per-page
+	 * IOVA entries.  Unlike dma_alloc_noncontiguous(), dma_map_sgtable()
+	 * does NOT require a single contiguous IOVA window — it maps each page
+	 * independently — so the IOVA allocator's contiguous-range constraint
+	 * does not apply.
+	 *
+	 * sg_dma_address(buf->sgt.sgl) is the IOVA of the first page, which is
+	 * what the NPU hardware programs as the base address.  This is the same
+	 * value the BSP driver's CMA heap would provide (contiguous pages →
+	 * contiguous IOVA).  For scatter pages the hardware sees individual
+	 * 4 KB IOVAs, but the NPU firmware walks them via the sg list embedded
+	 * in the task structure rather than treating them as contiguous.
+	 */
+	dev_info(buf->dev,
+		 "rknpu_mem: mapping %zu bytes (%lu pages) dma_mask=0x%llx\n",
+		 buf->mem.size, buf->nr_pages,
+		 buf->dev->dma_mask ? *buf->dev->dma_mask : 0ULL);
+
+	ret = dma_map_sgtable(buf->dev, &buf->sgt, DMA_BIDIRECTIONAL, 0);
+	if (ret) {
+		dev_err(buf->dev,
+			"rknpu_mem: dma_map_sgtable failed: %d (size=%zu nents=%u dma_mask=0x%llx)\n",
+			ret, buf->mem.size, buf->sgt.nents,
+			buf->dev->dma_mask ? *buf->dev->dma_mask : 0ULL);
+		goto err_free_sgt;
+	}
+
+	dev_info(buf->dev,
+		 "rknpu_mem: mapped OK dma_addr=0x%llx nents=%u\n",
+		 (u64)sg_dma_address(buf->sgt.sgl), buf->sgt.nents);
+
+	buf->mem.dma_addr = sg_dma_address(buf->sgt.sgl);
+
+	/*
+	 * Provide a contiguous kernel virtual address for rknpu_job.c so the
+	 * submit path can read the task/command array from kv_addr.
+	 */
+	buf->mem.kv_addr = vmap(buf->pages, buf->nr_pages, VM_MAP, PAGE_KERNEL);
 	if (!buf->mem.kv_addr) {
-		dma_free_noncontiguous(buf->dev, buf->mem.size, buf->sgt,
-				       DMA_BIDIRECTIONAL);
-		kfree(buf);
-		return -ENOMEM;
+		dev_err(buf->dev, "rknpu_mem: vmap failed (nr_pages=%lu)\n", buf->nr_pages);
+		ret = -ENOMEM;
+		goto err_unmap_sgt;
 	}
-
-	/*
-	 * IOVA base address for the NPU hardware.  dma_alloc_noncontiguous()
-	 * maps all scatter pages into a single contiguous IOVA window via the
-	 * IOMMU, so sg_dma_address(sgt->sgl) is the start of that window.
-	 */
-	buf->mem.dma_addr = sg_dma_address(buf->sgt->sgl);
 
 	/*
 	 * Create a userspace-mmappable fd.  Memory freed via release callback
-	 * when the fd is closed, matching the lifetime semantics of
-	 * rk_dma_heap_bufferfd_alloc in the BSP driver.
+	 * when the fd is closed.
 	 */
 	fd = anon_inode_getfd("[rknpu_mem]", &rknpu_mem_obj_fops, buf,
 			      O_RDWR | O_CLOEXEC);
 	if (fd < 0) {
-		dma_vunmap_noncontiguous(buf->dev, buf->mem.kv_addr);
-		dma_free_noncontiguous(buf->dev, buf->mem.size, buf->sgt,
-				       DMA_BIDIRECTIONAL);
-		kfree(buf);
-		return fd;
+		ret = fd;
+		goto err_vunmap;
 	}
 
 	args.handle   = (__u32)fd;
@@ -176,19 +231,30 @@ int rknpu_mem_create_ioctl(struct rknpu_device *rknpu_dev, struct file *file,
 	 *
 	 * rknpu_job.c:rknpu_job_subcore_commit_pc() casts task_obj_addr as
 	 *   (struct rknpu_mem_object *)(uintptr_t)task_obj_addr
-	 * and then reads ->kv_addr to locate the command/task array in the
-	 * buffer.  We must return the address of &buf->mem (not cpu_addr)
-	 * so the submit path dereferences a valid, populated struct rather
-	 * than treating random NPU command bytes as struct fields.
+	 * and reads ->kv_addr to locate the command/task array.
 	 */
 	args.obj_addr = (u64)(uintptr_t)&buf->mem;
 
 	if (copy_to_user((void __user *)data, &args, sizeof(args))) {
-		/* fd already installed; caller must close it to free memory */
+		/* fd installed; caller must close to free memory */
 		return -EFAULT;
 	}
 
 	return 0;
+
+err_vunmap:
+	vunmap(buf->mem.kv_addr);
+err_unmap_sgt:
+	dma_unmap_sgtable(buf->dev, &buf->sgt, DMA_BIDIRECTIONAL, 0);
+err_free_sgt:
+	sg_free_table(&buf->sgt);
+err_free_pages:
+	/* free pages that were successfully allocated (indices 0..i-1) */
+	while (i > 0)
+		__free_page(buf->pages[--i]);
+	vfree(buf->pages);
+	kfree(buf);
+	return ret;
 }
 
 int rknpu_mem_destroy_ioctl(struct rknpu_device *rknpu_dev, struct file *file,
@@ -205,9 +271,9 @@ int rknpu_mem_destroy_ioctl(struct rknpu_device *rknpu_dev, struct file *file,
 int rknpu_mem_sync_ioctl(struct rknpu_device *rknpu_dev, unsigned long data)
 {
 	/*
-	 * dma_alloc_noncontiguous() allocates coherent memory on ARM64 via
-	 * SMMUv3; cache maintenance is handled by the DMA subsystem.
-	 * No explicit sync is required here.
+	 * Pages are allocated with GFP_KERNEL (cache-coherent on ARM64 with
+	 * SMMUv3); dma_map_sgtable() handles CPU/device sync via the DMA
+	 * subsystem.  No explicit sync is required here.
 	 */
 	return 0;
 }

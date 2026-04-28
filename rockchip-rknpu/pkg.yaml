@@ -67,11 +67,12 @@ steps:
         # definitions.  librknnrt.so v2.3.x calls RKNPU_MEM_CREATE to allocate
         # NPU memory for model weights and command buffers.
         #
-        # Bug 55: dma_alloc_coherent() (the rev-2 implementation) fails for
-        # large RKLLM model allocations (e.g. 2.4 GB for gemma2:2b) in IOMMU
-        # translated mode.  Fix: use dma_alloc_noncontiguous() which allocates
-        # scatter pages mapped into a single contiguous IOVA by the IOMMU.
-        # dma_vmap_noncontiguous() provides the kernel VA for rknpu_job.c.
+        # Bug 55 rev 2: dma_alloc_noncontiguous() also returns NULL on kernel
+        # 6.18.22 because iommu_dma_alloc_pages() fails to find a contiguous
+        # 2.4 GB IOVA window within the device's IOVA domain.  Fix: allocate
+        # pages individually with alloc_page(GFP_KERNEL), build an sg_table,
+        # then call dma_map_sgtable() which maps each page individually without
+        # needing a contiguous IOVA range.  vmap() provides the kernel VA.
         cp /pkg/files/rknpu_mem.c src/rknpu_mem.c
 
         # Bug 35: rknpu_gem_sync_ioctl references rknpu_dev->fake_dev in the

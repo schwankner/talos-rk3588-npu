@@ -2167,36 +2167,61 @@ The direct DMA heap (`/dev/dma_heap/system`) CAN allocate 2.4 GB because it uses
 pages mapped into a single IOVA window by the SMMU. Our rknpu ioctl was not using this
 path.
 
-**Fix:** Replace `dma_alloc_coherent()` with `dma_alloc_noncontiguous()` +
-`dma_vmap_noncontiguous()` in `rknpu_mem_create_ioctl()`:
+**Fix (Rev 1 — incomplete):** Replace `dma_alloc_coherent()` with `dma_alloc_noncontiguous()` +
+`dma_vmap_noncontiguous()` in `rknpu_mem_create_ioctl()`. This was committed but turned out
+to also fail silently on 6.18.22 / ARM SMMUv3 — see Rev 2 below.
+
+**Why Rev 1 also fails:** `dma_alloc_noncontiguous()` internally calls
+`iommu_dma_alloc_pages()` → `iommu_dma_alloc_iova()` for the TOTAL allocation size as a
+single contiguous IOVA window.  Early boot allocations fragment the 4 GB IOVA space of the
+`fdab0000.rknpu` device, and a contiguous 2.4 GB IOVA window is not available.  The call
+returns NULL with no error message (silent failure).
+
+**Fix (Rev 2 — current):** Bypass `dma_alloc_noncontiguous()` entirely.  Allocate pages
+individually with `alloc_page(GFP_KERNEL)` — each single-page allocation always succeeds as
+long as there is free RAM — build an `sg_table` with `sg_alloc_table_from_pages()`, then
+call `dma_map_sgtable()`.  Unlike `dma_alloc_noncontiguous()`, `dma_map_sgtable()` maps
+each page independently into the IOVA space (no single contiguous IOVA window required).
+`vmap()` provides the contiguous kernel virtual address for `rknpu_job.c`.
 
 ```c
 struct rknpu_mem_buf {
-    struct rknpu_mem_object  mem;   /* MUST be first — cast target in submit */
+    struct rknpu_mem_object  mem;     /* MUST be first — cast target in submit */
     struct device           *dev;
-    struct sg_table         *sgt;   /* scatter pages, IOMMU-mapped to single IOVA */
+    struct sg_table          sgt;    /* embedded (not pointer); IOMMU-mapped per-page */
+    struct page            **pages;  /* page array, nr_pages entries */
+    unsigned long            nr_pages;
 };
 
-buf->sgt = dma_alloc_noncontiguous(buf->dev, buf->mem.size,
-                                   DMA_BIDIRECTIONAL, GFP_KERNEL, 0);
-buf->mem.kv_addr = dma_vmap_noncontiguous(buf->dev, buf->mem.size, buf->sgt);
-buf->mem.dma_addr = sg_dma_address(buf->sgt->sgl);  /* IOVA base */
+/* allocate pages one at a time — no physically-contiguous or CMA requirement */
+buf->pages = vmalloc(nr_pages * sizeof(struct page *));
+for (i = 0; i < nr_pages; i++)
+    buf->pages[i] = alloc_page(GFP_KERNEL | __GFP_ZERO);
+
+sg_alloc_table_from_pages(&buf->sgt, buf->pages, nr_pages, 0, size, GFP_KERNEL);
+
+/* maps each page individually — no contiguous IOVA window needed */
+dma_map_sgtable(buf->dev, &buf->sgt, DMA_BIDIRECTIONAL, 0);
+
+buf->mem.dma_addr = sg_dma_address(buf->sgt.sgl);   /* IOVA of first page */
+buf->mem.kv_addr  = vmap(buf->pages, nr_pages, VM_MAP, PAGE_KERNEL);
 ```
 
-`dma_alloc_noncontiguous()` allocates scatter pages from the system (no CMA required)
-and maps them into a single contiguous IOVA window via the SMMU. The NPU hardware sees a
-contiguous DMA address range (IOVA). `dma_vmap_noncontiguous()` provides a contiguous
-kernel virtual address for `rknpu_job.c` to read the task/command array.
+Memory is freed in `rknpu_mem_obj_release()` when the anon fd is closed:
+`vunmap` → `dma_unmap_sgtable` → `sg_free_table` → `__free_page` × N → `vfree(pages)`.
 
-The `anon_inode_getfd()` approach for `mmap()` support is preserved:
-`rknpu_mem_obj_mmap()` calls `dma_mmap_noncontiguous()`.
+**Requires:** IOMMU translated mode (SMMUv3 active).  In IOMMU passthrough mode
+`dma_map_sgtable()` would also need a contiguous PA window, but IOMMU translated mode is
+always required for multi-core NPU operation (see Bug 52).
 
-**Requires:** IOMMU translated mode (`iommu.passthrough=1` must NOT be set). With IOMMU
-passthrough, `dma_alloc_noncontiguous()` falls back to a physically-contiguous path which
-again fails for 2.4 GB.
+**BuildKit cache bypass:** when `force_rebuild=true` is set in the GitHub Actions workflow,
+`build-extensions.sh` now receives `FORCE=true` and passes `--no-cache` to
+`docker buildx build`.  Previously `force_rebuild` only bypassed the image-existence check
+(`docker manifest inspect`); the BuildKit registry layer cache still served stale layers,
+so local file changes (e.g. `rknpu_mem.c`) were silently ignored.
 
 **Observed on:** rknpu.ko 0.9.10, librknnrt.so 2.3.2, Talos 1.13.0-rc.0 /
-kernel 6.18.22-talos, Turing RK1 (RK3588). gemma2:2b (2.4 GB) fails without this fix.
+kernel 6.18.22-talos, Turing RK1 (RK3588). gemma2:2b (2.4 GB) fails without Rev 2.
 
 ---
 

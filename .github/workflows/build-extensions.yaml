@@ -81,10 +81,12 @@ jobs:
         env:
           REGISTRY: "ghcr.io/${{ github.repository_owner }}"
           CACHE_REGISTRY: "ghcr.io/${{ github.repository_owner }}/build-cache"
+          FORCE: "${{ inputs.force_rebuild }}"
         run: |
           source scripts/common.sh
           REGISTRY="${REGISTRY}" \
           CACHE_REGISTRY="${CACHE_REGISTRY}" \
+          FORCE="${FORCE}" \
           bash scripts/build-extensions.sh all
 
       - name: Summary
