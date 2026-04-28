@@ -2240,20 +2240,58 @@ rknpu_mem: dma_alloc_noncontiguous failed (size=2614099968 dma_mask=0xffffffffff
 ```
 Note: `dma_mask=0xffffffffff` (40-bit) is shown but `coherent_dma_mask` is still 32-bit.
 
-**Fix (Rev 4 — current):** Use `dma_set_mask_and_coherent()` instead of `dma_set_mask()`.
+**Fix (Rev 4 — superseded by Rev 5):** Use `dma_set_mask_and_coherent()` instead of `dma_set_mask()`.
 This raises both masks to 40-bit.  With `coherent_dma_mask = 40-bit`, the IOVA limit is 1 TB;
 valid 4 GB-aligned slots appear at IOVA 4 GB, 8 GB, 12 GB … all free (existing allocations
 are below 4 GB).  `dma_alloc_noncontiguous()` succeeds.
 
-```c
-/* Large allocation path (> 256 MiB) — Bug 55 Rev 4 */
-if (buf->dev->coherent_dma_mask < DMA_BIT_MASK(40))
-    dma_set_mask_and_coherent(buf->dev, DMA_BIT_MASK(40));  /* both masks → 1 TB IOVA */
+**Why Rev 4 also fails (dma_alloc_noncontiguous with both masks at 40-bit):**
+The IOVA domain is not resized dynamically when the DMA mask is changed at runtime.
+The IOVA domain (`iova_domain` inside the `iommu_dma_cookie`) is initialized on the
+**first DMA operation** (`iommu_dma_init_domain` → `init_iova_domain`), with `end_pfn`
+derived from the DMA mask in effect at that exact moment.
 
+Rev 4 places the mask-widening call in the large-buffer branch.  But small buffer
+allocations (19 MiB, 83 MiB) happen **first** with the initial 32-bit mask, locking
+the IOVA domain to `[0, 4 GB)`.  By the time the 2.4 GB allocation arrives and widens
+the mask, `init_iova_domain` was already called with `end_pfn = 0xfffff` — and it is
+never called again.  Widening `coherent_dma_mask` after domain initialization is a no-op
+for existing allocations.
+
+Kernel log confirming Rev 4 failure:
+```
+rknpu_mem: mapped OK dma_addr=0xfe000000 nents=27   (19 MB — initialises IOVA domain at 32-bit)
+rknpu_mem: mapped OK dma_addr=0xf8000000 nents=1    (83 MB — IOVA domain already 32-bit)
+rknpu_mem: DMA mask widened to 40-bit               (too late — domain already initialized)
+rknpu_mem: noncontig alloc 2614099968 bytes dma_mask=0xffffffffff
+rknpu_mem: dma_alloc_noncontiguous failed (size=2614099968 dma_mask=0xffffffffff)
+```
+
+**Fix (Rev 5 — current):** Move the `dma_set_mask_and_coherent()` call to the **top** of
+`rknpu_mem_create_ioctl()`, before any size check or DMA operation.  The very first call
+(always a small buffer) now initializes the IOVA domain with a 40-bit limit
+(`end_pfn = 1 TB >> PAGE_SHIFT`).  All subsequent allocations — large and small — operate
+within that 1 TB domain.
+
+```c
+/* rknpu_mem_create_ioctl() — Rev 5: widen masks BEFORE first DMA op */
+if (buf->dev->coherent_dma_mask < DMA_BIT_MASK(40))
+    dma_set_mask_and_coherent(buf->dev, DMA_BIT_MASK(40));  /* must be first */
+
+/* ... then, for large allocations (> 256 MiB): */
 buf->nc_sgt = dma_alloc_noncontiguous(buf->dev, size, DMA_BIDIRECTIONAL, GFP_KERNEL, 0);
 buf->mem.dma_addr = sg_dma_address(buf->nc_sgt->sgl);   /* contiguous IOVA base */
 buf->mem.kv_addr  = dma_vmap_noncontiguous(buf->dev, size, buf->nc_sgt);
 /* teardown: dma_vunmap_noncontiguous() + dma_free_noncontiguous() */
+```
+
+Expected dmesg on success (Rev 5):
+```
+rknpu_mem: DMA mask widened to 40-bit               ← fires on FIRST allocation (small)
+rknpu_mem: mapped OK dma_addr=0xfe000000 nents=27   ← small buffer, IOVA domain now 40-bit
+rknpu_mem: mapped OK dma_addr=0xf8000000 nents=1    ← small buffer
+rknpu_mem: noncontig alloc 2614099968 bytes dma_mask=0xffffffffff
+rknpu_mem: noncontig mapped OK dma_addr=0x100000000 ← IOVA > 4 GB confirms 40-bit domain
 ```
 
 **Requires:** IOMMU translated mode (SMMUv3 active), kernel 6.18+, 40-bit DMA mask support.

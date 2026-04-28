@@ -94,6 +94,25 @@
  * beyond the existing sub-4 GB mappings and freely available.  The
  * dma_alloc_noncontiguous() call then succeeds.
  *
+ * Bug 55 (fix, rev 5): dma_alloc_noncontiguous() still fails even with both
+ * masks at 40-bit.  Root cause: the IOVA domain is not resized dynamically
+ * when the DMA mask is changed at runtime.  The IOVA domain (iova_domain
+ * inside the iommu_dma_cookie) is initialized on the FIRST DMA operation
+ * (iommu_dma_init_domain → init_iova_domain), with end_pfn derived from
+ * the DMA mask in effect AT THAT MOMENT.  Revs 3 and 4 widened the mask only
+ * in the large-buffer branch, which runs AFTER the small buffer allocations
+ * (19 MiB and 83 MiB).  Those small allocations happened first with a 32-bit
+ * mask, locking the IOVA domain to [0, 4 GB).  Widening the mask later has
+ * no effect because the domain is already initialized.
+ *
+ * Fix (rev 5): widen the DMA mask to 40-bit at the TOP of
+ * rknpu_mem_create_ioctl(), unconditionally, before any size check or DMA
+ * operation.  The first call (which is always a small buffer) now initialises
+ * the IOVA domain with a 40-bit limit (end_pfn = 1 TB >> PAGE_SHIFT).
+ * All subsequent allocations — large and small — operate within that 1 TB
+ * domain, so the 4 GB-aligned 2.4 GB window required by gemma2:2b is
+ * available from the very first inference request.
+ *
  * Small allocations (≤ RKNPU_MEM_LARGE_THR) continue to use the Rev 2
  * alloc_page + dma_map_sgtable path; they produce nents=1 (one physically-
  * contiguous block) and work correctly.
@@ -242,26 +261,29 @@ int rknpu_mem_create_ioctl(struct rknpu_device *rknpu_dev, struct file *file,
 	buf->mem.size	 = PAGE_ALIGN(args.size);
 	buf->nr_pages	 = buf->mem.size >> PAGE_SHIFT;
 
+	/*
+	 * Bug 55 rev 5: widen BOTH DMA masks to 40-bit on the FIRST allocation
+	 * (before any DMA operation touches the device) so the IOVA domain is
+	 * initialised with a 1 TB limit.  If this is done only in the large-
+	 * buffer branch (rev 3/4), the small buffer allocations that precede it
+	 * have already locked the IOVA domain to 32-bit.
+	 */
+	if (buf->dev->coherent_dma_mask < DMA_BIT_MASK(40)) {
+		if (!dma_set_mask_and_coherent(buf->dev, DMA_BIT_MASK(40)))
+			dev_info(buf->dev,
+				 "rknpu_mem: DMA mask widened to 40-bit\n");
+	}
+
 	if (buf->mem.size > RKNPU_MEM_LARGE_THR) {
 		/*
-		 * Bug 55 rev 4: large allocation path.
+		 * Bug 55 rev 3/5: large allocation path.
 		 *
-		 * Widen BOTH dma_mask and coherent_dma_mask to 40-bit using
-		 * dma_set_mask_and_coherent().  dma_alloc_noncontiguous() uses
-		 * coherent_dma_mask for the IOVA upper limit; the earlier
-		 * dma_set_mask()-only approach (rev 3) left coherent_dma_mask at
-		 * 32-bit, which imposed a 4 GB IOVA alignment requirement that
-		 * has no valid slot in the 4 GB IOVA space.
-		 *
-		 * With both masks at 40-bit the IOVA limit is 1 TB; valid
-		 * 4 GB-aligned slots appear at IOVA 4 GB, 8 GB, … well clear of
-		 * existing sub-4 GB mappings.
+		 * dma_alloc_noncontiguous() maps physically-scattered pages into
+		 * a SINGLE contiguous IOVA range through the IOMMU page table.
+		 * The NPU hardware sees a flat [iova, iova + size) window.
+		 * The 40-bit mask widening above ensures the IOVA domain has
+		 * enough room for the 4 GB-aligned 2.4 GB window.
 		 */
-		if (buf->dev->coherent_dma_mask < DMA_BIT_MASK(40)) {
-			if (!dma_set_mask_and_coherent(buf->dev, DMA_BIT_MASK(40)))
-				dev_info(buf->dev,
-					 "rknpu_mem: DMA mask widened to 40-bit\n");
-		}
 
 		/*
 		 * Step 2: allocate scattered physical pages and map them into a
