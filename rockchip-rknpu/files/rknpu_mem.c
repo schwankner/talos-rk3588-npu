@@ -74,6 +74,26 @@
  *   dma_vmap_noncontiguous() provides the contiguous kernel virtual address
  *   (kv_addr) for rknpu_job.c.
  *
+ * Bug 55 (fix, rev 4): dma_alloc_noncontiguous() fails even after widening
+ * dma_mask to 40-bit.  Root cause: dma_alloc_noncontiguous() uses
+ * dev->coherent_dma_mask (not dma_mask) to compute the IOVA upper limit.
+ * Rev 3 called dma_set_mask() which only updates *dev->dma_mask, leaving
+ * coherent_dma_mask at 32-bit (0xffffffff).
+ *
+ * With coherent_dma_mask = 32-bit, __alloc_and_insert_iova_range() imposes a
+ * size-alignment constraint on the IOVA start address:
+ *   align = 2 ^ fls_long(size_pfn - 1)
+ * For size = 638,208 PFN (2.4 GB), fls_long = 20, so the IOVA must be
+ * 2^20-PFN = 4 GB aligned.  The only 4 GB-aligned address in a 4 GB IOVA
+ * space is 0, which is reserved (start_pfn = 1).  The allocation fails with
+ * -ENOMEM regardless of how much IOVA space is available.
+ *
+ * Fix (rev 4): call dma_set_mask_and_coherent() instead of dma_set_mask().
+ * This also raises coherent_dma_mask to 40-bit, so the IOVA limit becomes
+ * 1 TB.  Valid 4 GB-aligned IOVA slots appear at 4 GB, 8 GB, 12 GB … all
+ * beyond the existing sub-4 GB mappings and freely available.  The
+ * dma_alloc_noncontiguous() call then succeeds.
+ *
  * Small allocations (≤ RKNPU_MEM_LARGE_THR) continue to use the Rev 2
  * alloc_page + dma_map_sgtable path; they produce nents=1 (one physically-
  * contiguous block) and work correctly.
@@ -224,17 +244,21 @@ int rknpu_mem_create_ioctl(struct rknpu_device *rknpu_dev, struct file *file,
 
 	if (buf->mem.size > RKNPU_MEM_LARGE_THR) {
 		/*
-		 * Bug 55 rev 3: large allocation path.
+		 * Bug 55 rev 4: large allocation path.
 		 *
-		 * Step 1: widen DMA mask to 40-bit.  The default 32-bit mask
-		 * limits the IOVA space to 4 GB; a 2.4 GB contiguous IOVA window
-		 * cannot be carved out of a partially-fragmented 4 GB space.
-		 * 40-bit mask gives a 1 TB IOVA range where the allocation is
-		 * trivial.  The RK3588 SoC and its ARM SMMU-500 support 40-bit
-		 * IOVAs (physical address space is 40-bit).
+		 * Widen BOTH dma_mask and coherent_dma_mask to 40-bit using
+		 * dma_set_mask_and_coherent().  dma_alloc_noncontiguous() uses
+		 * coherent_dma_mask for the IOVA upper limit; the earlier
+		 * dma_set_mask()-only approach (rev 3) left coherent_dma_mask at
+		 * 32-bit, which imposed a 4 GB IOVA alignment requirement that
+		 * has no valid slot in the 4 GB IOVA space.
+		 *
+		 * With both masks at 40-bit the IOVA limit is 1 TB; valid
+		 * 4 GB-aligned slots appear at IOVA 4 GB, 8 GB, … well clear of
+		 * existing sub-4 GB mappings.
 		 */
-		if (*buf->dev->dma_mask < DMA_BIT_MASK(40)) {
-			if (!dma_set_mask(buf->dev, DMA_BIT_MASK(40)))
+		if (buf->dev->coherent_dma_mask < DMA_BIT_MASK(40)) {
+			if (!dma_set_mask_and_coherent(buf->dev, DMA_BIT_MASK(40)))
 				dev_info(buf->dev,
 					 "rknpu_mem: DMA mask widened to 40-bit\n");
 		}

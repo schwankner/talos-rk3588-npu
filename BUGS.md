@@ -2202,7 +2202,7 @@ rknpu_mem: mapped OK dma_addr=0xf8000000 nents=1  (84 MB — succeeds)
 rknpu_mem: dma_map_sgtable failed: -12 (size=2614099968 nents=2 dma_mask=0xffffffff)
 ```
 
-**Fix (Rev 3 — current):** Two-step solution for large allocations (> 256 MiB):
+**Fix (Rev 3 — superseded by Rev 4):** Two-step solution for large allocations (> 256 MiB):
 
 *Step 1:* widen the DMA mask to 40-bit before the allocation.  The RK3588 SoC and its ARM
 SMMU-500 support 40-bit IOVAs (physical address space is 40-bit).  A 40-bit mask gives a
@@ -2218,10 +2218,37 @@ table, so the NPU hardware sees a flat `[iova, iova + size)` window.
 Small allocations (≤ 256 MiB) continue to use the Rev 2 `alloc_page + dma_map_sgtable`
 path; they produce `nents=1` (one physically-contiguous block) and work correctly.
 
+**Why Rev 3 also fails (dma_alloc_noncontiguous with 40-bit dma_mask):**
+`dma_alloc_noncontiguous()` uses `dev->coherent_dma_mask` (not `dma_mask`) to set the IOVA
+upper limit.  Rev 3 called `dma_set_mask()` which only updates `*dev->dma_mask`, leaving
+`coherent_dma_mask` at 32-bit (0xffffffff).
+
+With `coherent_dma_mask = 32-bit`, `__alloc_and_insert_iova_range()` imposes a size-alignment
+constraint on the IOVA start address:
+```
+align = 2 ^ fls_long(size_pfn - 1)
+```
+For 638,208 PFN (2.4 GB), `fls_long = 20`, so the IOVA start must be **4 GB-aligned**.
+The only 4 GB-aligned address in a 4 GB IOVA space is 0, which is reserved (`start_pfn = 1`).
+The allocation fails with -ENOMEM regardless of available free IOVA space.
+
+Kernel log confirming Rev 3 failure:
+```
+rknpu_mem: DMA mask widened to 40-bit
+rknpu_mem: noncontig alloc 2614099968 bytes dma_mask=0xffffffffff
+rknpu_mem: dma_alloc_noncontiguous failed (size=2614099968 dma_mask=0xffffffffff)
+```
+Note: `dma_mask=0xffffffffff` (40-bit) is shown but `coherent_dma_mask` is still 32-bit.
+
+**Fix (Rev 4 — current):** Use `dma_set_mask_and_coherent()` instead of `dma_set_mask()`.
+This raises both masks to 40-bit.  With `coherent_dma_mask = 40-bit`, the IOVA limit is 1 TB;
+valid 4 GB-aligned slots appear at IOVA 4 GB, 8 GB, 12 GB … all free (existing allocations
+are below 4 GB).  `dma_alloc_noncontiguous()` succeeds.
+
 ```c
-/* Large allocation path (> 256 MiB) */
-if (*buf->dev->dma_mask < DMA_BIT_MASK(40))
-    dma_set_mask(buf->dev, DMA_BIT_MASK(40));   /* expand IOVA space to 1 TB */
+/* Large allocation path (> 256 MiB) — Bug 55 Rev 4 */
+if (buf->dev->coherent_dma_mask < DMA_BIT_MASK(40))
+    dma_set_mask_and_coherent(buf->dev, DMA_BIT_MASK(40));  /* both masks → 1 TB IOVA */
 
 buf->nc_sgt = dma_alloc_noncontiguous(buf->dev, size, DMA_BIDIRECTIONAL, GFP_KERNEL, 0);
 buf->mem.dma_addr = sg_dma_address(buf->nc_sgt->sgl);   /* contiguous IOVA base */
@@ -2238,7 +2265,7 @@ buf->mem.kv_addr  = dma_vmap_noncontiguous(buf->dev, size, buf->nc_sgt);
 so local file changes (e.g. `rknpu_mem.c`) were silently ignored.
 
 **Observed on:** rknpu.ko 0.9.10, librknnrt.so 2.3.2, Talos 1.13.0-rc.0 /
-kernel 6.18.22-talos, Turing RK1 (RK3588). gemma2:2b (2.4 GB) fails without Rev 3.
+kernel 6.18.22-talos, Turing RK1 (RK3588). gemma2:2b (2.4 GB) fails without Rev 4.
 
 ---
 
