@@ -141,6 +141,7 @@
 #include <linux/dma-mapping.h>
 #include <linux/errno.h>
 #include <linux/fs.h>
+#include <linux/highmem.h>
 #include <linux/iommu.h>
 #include <linux/mm.h>
 #include <linux/scatterlist.h>
@@ -499,10 +500,57 @@ int rknpu_mem_destroy_ioctl(struct rknpu_device *rknpu_dev, struct file *file,
 
 int rknpu_mem_sync_ioctl(struct rknpu_device *rknpu_dev, unsigned long data)
 {
+	struct rknpu_mem_sync args;
+	struct rknpu_mem_buf *buf;
+	unsigned long i;
+
+	if (copy_from_user(&args, (void __user *)data, sizeof(args)))
+		return -EFAULT;
+
+	if (!args.obj_addr)
+		return -EINVAL;
+
 	/*
-	 * Pages are allocated with GFP_KERNEL (cache-coherent on ARM64);
-	 * iommu_map() / dma_map_sgtable() handle CPU/device sync via the DMA
-	 * subsystem or IOMMU subsystem.  No explicit sync required.
+	 * obj_addr is &buf->mem (filled by rknpu_mem_create_ioctl).
+	 * mem is the first member of rknpu_mem_buf so the two pointers
+	 * are identical — no container_of offset arithmetic needed.
 	 */
+	buf = (struct rknpu_mem_buf *)(uintptr_t)args.obj_addr;
+
+	if (buf->use_iommu_map) {
+		/*
+		 * Large-path: pages were mapped via iommu_map(), bypassing the
+		 * DMA subsystem.  The Rockchip IOMMU does not participate in
+		 * the ARM64 cache-coherency domain, so cache maintenance must
+		 * be done explicitly.
+		 *
+		 * The mmap path uses pgprot_writecombine, which bypasses the
+		 * CPU cache on writes (data goes directly to DRAM).  However
+		 * the kernel's vmap alias (PAGE_KERNEL, cacheable) may hold
+		 * stale lines populated during __GFP_ZERO at allocation time.
+		 * flush_dcache_page() issues a clean+invalidate for each page,
+		 * ensuring that subsequent cacheable reads through kv_addr (in
+		 * rknpu_job.c) fetch the model data written by librknnrt.so
+		 * rather than the stale zero lines.
+		 *
+		 * Flush all pages regardless of direction: both TO_DEVICE and
+		 * FROM_DEVICE require coherent visibility of the full buffer.
+		 */
+		for (i = 0; i < buf->nr_pages; i++)
+			flush_dcache_page(buf->pages[i]);
+	} else {
+		/*
+		 * Small-path: buffer was mapped via dma_map_sgtable().  Use
+		 * the DMA layer for cache maintenance so that the Rockchip
+		 * IOMMU driver can do any platform-specific work it needs.
+		 */
+		if (args.flags & RKNPU_MEM_SYNC_TO_DEVICE)
+			dma_sync_sg_for_device(buf->dev, buf->sgt.sgl,
+					       buf->sgt.nents, DMA_TO_DEVICE);
+		if (args.flags & RKNPU_MEM_SYNC_FROM_DEVICE)
+			dma_sync_sg_for_cpu(buf->dev, buf->sgt.sgl,
+					    buf->sgt.nents, DMA_FROM_DEVICE);
+	}
+
 	return 0;
 }
