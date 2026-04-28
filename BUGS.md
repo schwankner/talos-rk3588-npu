@@ -2267,34 +2267,85 @@ rknpu_mem: noncontig alloc 2614099968 bytes dma_mask=0xffffffffff
 rknpu_mem: dma_alloc_noncontiguous failed (size=2614099968 dma_mask=0xffffffffff)
 ```
 
-**Fix (Rev 5 — current):** Move the `dma_set_mask_and_coherent()` call to the **top** of
-`rknpu_mem_create_ioctl()`, before any size check or DMA operation.  The very first call
-(always a small buffer) now initializes the IOVA domain with a 40-bit limit
-(`end_pfn = 1 TB >> PAGE_SHIFT`).  All subsequent allocations — large and small — operate
-within that 1 TB domain.
+**Fix (Rev 5 — superseded by Rev 6):** Move the `dma_set_mask_and_coherent()` call to the
+**top** of `rknpu_mem_create_ioctl()`, before any size check or DMA operation.  The very first
+call (always a small buffer) now initializes the IOVA domain with a 40-bit limit.
+
+**Why Rev 5 also fails (dma_alloc_noncontiguous with ordering fixed):**
+Two compounding issues that Rev 5 does not address:
+
+1. **The rknpu device uses the Rockchip IOMMU (`rknpu_mmu`, compatible
+   `rockchip,rk3568-iommu`), NOT the ARM SMMUv3.**  The Rockchip IOMMU has a
+   **hardware limit of 32-bit IOVA space** (4 GB maximum).  The IOVA domain is
+   initialized at `platform_dma_configure` time (before `rknpu_probe()` runs), using
+   the device's default 32-bit `coherent_dma_mask`.  `iommu_dma_init_domain` has an
+   early return if `iovad->start_pfn` is already set — it will NOT re-initialize the
+   domain after probe.  Widening the DMA mask at runtime in `rknpu_mem_create_ioctl()`
+   changes `coherent_dma_mask` but does **not** change `iovad->end_pfn` (still 4 GB).
+
+2. **The 4 GB-alignment constraint is impossible in a 4 GB domain.**
+   `dma_alloc_noncontiguous()` calls `alloc_iova_fast(... size_aligned=true)`.
+   For 638,208 PFN (2.4 GB), `size_aligned=true` forces `fls_long(638208-1) = 20`-bit
+   (4 GB) alignment.  The only 4 GB-aligned address in `[0, 4 GB)` is 0x0, which is
+   reserved (`start_pfn = 1`).  The allocation fails unconditionally.
+
+Kernel log confirming Rev 5 failure (ordering correct but allocation still fails):
+```
+rknpu_mem: DMA mask widened to 40-bit               ← correct: fires BEFORE first DMA op
+rknpu_mem: mapping 19247104 bytes ... dma_mask=0xffffffffff
+rknpu_mem: mapped OK dma_addr=0xfe000000 nents=1
+rknpu_mem: mapping 83517440 bytes ... dma_mask=0xffffffffff
+rknpu_mem: mapped OK dma_addr=0xf8000000 nents=1
+rknpu_mem: noncontig alloc 2614099968 bytes dma_mask=0xffffffffff
+rknpu_mem: dma_alloc_noncontiguous failed (size=2614099968 dma_mask=0xffffffffff)
+```
+Small buffer DMA addresses (0xfe000000, 0xf8000000) confirm the IOVA domain is still
+limited to 32-bit regardless of the mask widening.
+
+**Fix (Rev 6 — current):** Bypass the DMA IOVA allocator entirely for large buffers.
+Use `iommu_map()` directly at a manually-managed IOVA cursor, avoiding the
+`size_aligned=true` constraint that makes 2.4 GB impossible in a 4 GB IOVA space.
+
+Key insight: the Rockchip IOMMU page tables support any 4 KB-aligned IOVA.  The
+`size_aligned` constraint is an IOVA allocator optimization (TLB efficiency), NOT a
+hardware requirement.  By calling `iommu_map()` directly, we bypass it entirely.
+
+IOVA assignment strategy:
+- Module-level `atomic64_t rknpu_iova_cursor` starts at 1 MB (`RKNPU_IOVA_BASE`).
+- Each large allocation advances the cursor by `ALIGN(size, 1 GB)`.
+- The DMA IOVA allocator works top-down from near 4 GB (first small alloc at
+  0xfe000000); our cursor grows bottom-up from 1 MB.  For 1–2 large model buffers
+  the ranges never overlap.
+- Physical pages are coalesced into contiguous runs before mapping to minimize
+  `iommu_map()` call count.
 
 ```c
-/* rknpu_mem_create_ioctl() — Rev 5: widen masks BEFORE first DMA op */
-if (buf->dev->coherent_dma_mask < DMA_BIT_MASK(40))
-    dma_set_mask_and_coherent(buf->dev, DMA_BIT_MASK(40));  /* must be first */
-
-/* ... then, for large allocations (> 256 MiB): */
-buf->nc_sgt = dma_alloc_noncontiguous(buf->dev, size, DMA_BIDIRECTIONAL, GFP_KERNEL, 0);
-buf->mem.dma_addr = sg_dma_address(buf->nc_sgt->sgl);   /* contiguous IOVA base */
-buf->mem.kv_addr  = dma_vmap_noncontiguous(buf->dev, size, buf->nc_sgt);
-/* teardown: dma_vunmap_noncontiguous() + dma_free_noncontiguous() */
+/* rknpu_mem_create_ioctl() — Rev 6: direct iommu_map() for large allocations */
+struct iommu_domain *domain = iommu_get_domain_for_dev(buf->dev);
+unsigned long iova = atomic64_fetch_add(ALIGN(size, RKNPU_IOVA_ALIGN),
+                                         &rknpu_iova_cursor);
+/* Map pages in physically-contiguous runs to minimize iommu_map() calls. */
+while (mapped < nr_pages) {
+    /* detect contiguous run ... */
+    iommu_map(domain, iova + (run << PAGE_SHIFT), base, run_size,
+              IOMMU_READ | IOMMU_WRITE | IOMMU_CACHE, GFP_KERNEL);
+}
+buf->mem.dma_addr = iova;
+buf->mem.kv_addr  = vmap(pages, nr_pages, VM_MAP, PAGE_KERNEL);
+/* teardown: iommu_unmap(domain, iova, size) + vunmap() + __free_page() × N */
 ```
 
-Expected dmesg on success (Rev 5):
+Expected dmesg on success (Rev 6):
 ```
-rknpu_mem: DMA mask widened to 40-bit               ← fires on FIRST allocation (small)
-rknpu_mem: mapped OK dma_addr=0xfe000000 nents=27   ← small buffer, IOVA domain now 40-bit
-rknpu_mem: mapped OK dma_addr=0xf8000000 nents=1    ← small buffer
-rknpu_mem: noncontig alloc 2614099968 bytes dma_mask=0xffffffffff
-rknpu_mem: noncontig mapped OK dma_addr=0x100000000 ← IOVA > 4 GB confirms 40-bit domain
+rknpu_mem: mapped OK dma_addr=0xfe000000 nents=1    ← small buffer (DMA path)
+rknpu_mem: mapped OK dma_addr=0xf8000000 nents=1    ← small buffer (DMA path)
+rknpu_mem: iommu_map alloc 2614099968 bytes iova=0x100000 (638208 pages)
+rknpu_mem: iommu_map OK iova=0x100000 size=2614099968
 ```
+IOVA 0x100000 is far below the small-buffer allocations at 0xf8000000+; no overlap.
 
-**Requires:** IOMMU translated mode (SMMUv3 active), kernel 6.18+, 40-bit DMA mask support.
+**Requires:** `iommu_get_domain_for_dev()` + `iommu_map()` available (always true with
+`CONFIG_IOMMU_API=y`).  No dependency on DMA mask, IOVA domain size, or SMMU type.
 
 **BuildKit cache bypass:** when `force_rebuild=true` is set in the GitHub Actions workflow,
 `build-extensions.sh` now receives `FORCE=true` and passes `--no-cache` to
@@ -2303,7 +2354,7 @@ rknpu_mem: noncontig mapped OK dma_addr=0x100000000 ← IOVA > 4 GB confirms 40-
 so local file changes (e.g. `rknpu_mem.c`) were silently ignored.
 
 **Observed on:** rknpu.ko 0.9.10, librknnrt.so 2.3.2, Talos 1.13.0-rc.0 /
-kernel 6.18.22-talos, Turing RK1 (RK3588). gemma2:2b (2.4 GB) fails without Rev 4.
+kernel 6.18.22-talos, Turing RK1 (RK3588). gemma2:2b (2.4 GB) fails through Rev 5.
 
 ---
 

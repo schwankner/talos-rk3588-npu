@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  * rknpu_mem.c — NPU memory allocation: small buffers via scatter-gather,
- *               large buffers via dma_alloc_noncontiguous + DMA mask widening.
+ *               large buffers via direct iommu_map() at a manually-managed
+ *               IOVA cursor.
  *
  * Bug 47 (initial): rk_dma_heap_find("rk-dma-heap-cma") returns NULL on
  * mainline 6.18 (Rockchip BSP CMA heap absent), and the Bug 36 fallback
@@ -27,12 +28,13 @@
  * submit path dereferences a valid, correctly-populated struct.
  *
  * Bug 55 (fix, rev 2): dma_alloc_noncontiguous() silently returns NULL on
- * kernel 6.18.22 / ARM SMMUv3 for the rknpu device even with abundant free
- * RAM.  Root cause: iommu_dma_ops.alloc_noncontiguous calls
+ * kernel 6.18.22 / Rockchip IOMMU for the rknpu device even with abundant
+ * free RAM.  Root cause: iommu_dma_ops.alloc_noncontiguous calls
  * iommu_dma_alloc_pages() which uses dma_alloc_pages() internally; under the
- * ARM SMMUv3 translated-mode domain for fdab0000.rknpu, iova_alloc() fails to
- * find a contiguous 2.4 GB window in the device's IOVA space (the device DMA
- * mask limits the IOVA range to 4 GB, and early boot allocations fragment it).
+ * Rockchip IOMMU translated-mode domain for fdab0000.rknpu, iova_alloc()
+ * fails to find a contiguous 2.4 GB window in the device's IOVA space (the
+ * device DMA mask limits the IOVA range to 4 GB, and early boot allocations
+ * fragment it).
  *
  * Fix (rev 2): bypass dma_alloc_noncontiguous() entirely.  Allocate physical
  * pages individually with alloc_page(GFP_KERNEL) — always succeeds given free
@@ -56,9 +58,9 @@
  *      region.  For nents=2, the two regions are NOT adjacent in IOVA space.
  *      The NPU hardware accesses model weights using base_iova + sequential
  *      byte offsets; beyond the first sg entry it reads unmapped IOVA and the
- *      SMMU raises a fault (or returns zeros).  Additionally, with the default
- *      32-bit DMA mask (4 GB IOVA), allocating a 1.2 GB contiguous IOVA window
- *      alongside other active mappings fails with -ENOMEM.
+ *      IOMMU raises a fault.  Additionally, with the default 32-bit DMA mask
+ *      (4 GB IOVA), allocating a 1.2 GB contiguous IOVA window alongside other
+ *      active mappings fails with -ENOMEM.
  *
  * Fix (rev 3): two-step solution for large allocations (> RKNPU_MEM_LARGE_THR):
  *
@@ -80,19 +82,7 @@
  * Rev 3 called dma_set_mask() which only updates *dev->dma_mask, leaving
  * coherent_dma_mask at 32-bit (0xffffffff).
  *
- * With coherent_dma_mask = 32-bit, __alloc_and_insert_iova_range() imposes a
- * size-alignment constraint on the IOVA start address:
- *   align = 2 ^ fls_long(size_pfn - 1)
- * For size = 638,208 PFN (2.4 GB), fls_long = 20, so the IOVA must be
- * 2^20-PFN = 4 GB aligned.  The only 4 GB-aligned address in a 4 GB IOVA
- * space is 0, which is reserved (start_pfn = 1).  The allocation fails with
- * -ENOMEM regardless of how much IOVA space is available.
- *
  * Fix (rev 4): call dma_set_mask_and_coherent() instead of dma_set_mask().
- * This also raises coherent_dma_mask to 40-bit, so the IOVA limit becomes
- * 1 TB.  Valid 4 GB-aligned IOVA slots appear at 4 GB, 8 GB, 12 GB … all
- * beyond the existing sub-4 GB mappings and freely available.  The
- * dma_alloc_noncontiguous() call then succeeds.
  *
  * Bug 55 (fix, rev 5): dma_alloc_noncontiguous() still fails even with both
  * masks at 40-bit.  Root cause: the IOVA domain is not resized dynamically
@@ -107,15 +97,38 @@
  *
  * Fix (rev 5): widen the DMA mask to 40-bit at the TOP of
  * rknpu_mem_create_ioctl(), unconditionally, before any size check or DMA
- * operation.  The first call (which is always a small buffer) now initialises
- * the IOVA domain with a 40-bit limit (end_pfn = 1 TB >> PAGE_SHIFT).
- * All subsequent allocations — large and small — operate within that 1 TB
- * domain, so the 4 GB-aligned 2.4 GB window required by gemma2:2b is
- * available from the very first inference request.
+ * operation.  The first call now initialises the IOVA domain with a 40-bit
+ * limit.
  *
- * Small allocations (≤ RKNPU_MEM_LARGE_THR) continue to use the Rev 2
- * alloc_page + dma_map_sgtable path; they produce nents=1 (one physically-
- * contiguous block) and work correctly.
+ * Bug 55 (fix, rev 6): dma_alloc_noncontiguous() STILL fails despite Rev 5's
+ * ordering fix.  Root cause (finally confirmed): the rknpu device uses the
+ * Rockchip IOMMU (rk3568-iommu, fdab9000.rknpu_mmu) which has a HARDWARE
+ * LIMIT of 32-bit IOVA (4 GB).  Widening the DMA mask to 40-bit has no effect
+ * on the Rockchip IOMMU's page-table address space.
+ *
+ * Additionally, dma_alloc_noncontiguous() uses size_aligned=true in
+ * alloc_iova_fast(), which forces the 2.4 GB buffer to be aligned to
+ *   2^fls_long(638208-1) = 2^20 PFN = 4 GB.
+ * Inside a 4 GB IOVA domain the only 4 GB-aligned address is 0x0, which is
+ * reserved (start_pfn=1).  The allocation fails regardless of DMA mask.
+ *
+ * Fix (rev 6): bypass the DMA IOVA allocator entirely for large allocations.
+ *
+ *   1. Allocate physical pages individually with alloc_page(GFP_KERNEL).
+ *
+ *   2. Assign an IOVA from a module-level cursor (rknpu_iova_cursor) that
+ *      starts at RKNPU_IOVA_BASE (1 MB) and grows upward in steps of the
+ *      allocation size (rounded up to RKNPU_IOVA_ALIGN, 1 GB).  The DMA IOVA
+ *      allocator works top-down from near 4 GB; our cursor grows bottom-up;
+ *      they do not overlap for the typical use-case of a few large buffers.
+ *
+ *   3. Map each page at cursor_iova + i*PAGE_SIZE via iommu_map().  Unlike
+ *      dma_alloc_noncontiguous(), iommu_map() writes page-table entries
+ *      directly with no alignment constraint beyond PAGE_SIZE.  The NPU
+ *      hardware sees a flat contiguous IOVA window.
+ *
+ *   4. vmap() the physical pages to provide a contiguous kernel virtual
+ *      address (kv_addr) for rknpu_job.c.
  *
  * struct rknpu_mem_buf wraps rknpu_mem_object with the fields needed for
  * teardown.  rknpu_mem_object MUST remain the first member so that
@@ -124,9 +137,11 @@
  */
 
 #include <linux/anon_inodes.h>
+#include <linux/atomic.h>
 #include <linux/dma-mapping.h>
 #include <linux/errno.h>
 #include <linux/fs.h>
+#include <linux/iommu.h>
 #include <linux/mm.h>
 #include <linux/scatterlist.h>
 #include <linux/slab.h>
@@ -137,13 +152,33 @@
 #include "include/rknpu_mem.h"
 
 /*
- * Allocations above this threshold use dma_alloc_noncontiguous() to obtain a
- * contiguous IOVA range through the IOMMU (Bug 55 rev 3).  Below the threshold
- * the alloc_page + dma_map_sgtable path produces nents=1 and works fine.
+ * Allocations above this threshold use the direct iommu_map() path to obtain
+ * a contiguous IOVA range without the size-alignment constraint imposed by
+ * the DMA IOVA allocator (Bug 55 rev 6).  Below the threshold the
+ * alloc_page + dma_map_sgtable path produces nents=1 and works fine.
  * 256 MiB sits well above the largest observed small allocation (~80 MiB) and
  * well below the failing 2.4 GiB model-weight buffer.
  */
 #define RKNPU_MEM_LARGE_THR  (256UL << 20)
+
+/*
+ * Manual IOVA allocator for large buffers (Bug 55 rev 6).
+ *
+ * RKNPU_IOVA_BASE: starting IOVA for large allocations.  1 MB keeps us well
+ * above the IOMMU's reserved zero page while leaving room below the DMA
+ * allocator's top-down allocations (first small alloc lands near 0xfe000000).
+ *
+ * RKNPU_IOVA_ALIGN: stride between consecutive large allocations.  Rounding
+ * each allocation up to 1 GB boundaries avoids fragmentation in the IOVA
+ * space and keeps the cursor advancing in predictable steps.
+ *
+ * With 3 GB of usable IOVA below the first small allocation (~0xf8000000),
+ * a single 2.4 GB allocation fits comfortably starting at 1 MB.
+ */
+#define RKNPU_IOVA_BASE   (1UL << 20)            /* 1 MB */
+#define RKNPU_IOVA_ALIGN  (1UL << 30)            /* 1 GB stride */
+
+static atomic64_t rknpu_iova_cursor = ATOMIC64_INIT(RKNPU_IOVA_BASE);
 
 /*
  * rknpu_mem_buf — private per-allocation state.
@@ -153,63 +188,40 @@
  * where task_obj_addr == obj_addr returned by rknpu_mem_create_ioctl.
  * Placing mem first makes (struct rknpu_mem_object *)obj_addr == &buf->mem.
  *
- * use_noncontig selects the allocation path:
- *   true  — dma_alloc_noncontiguous(); teardown via dma_vunmap_noncontiguous()
- *            + dma_free_noncontiguous().  nc_sgt holds the sg_table pointer.
- *   false — alloc_page() per page + dma_map_sgtable(); teardown via vunmap()
- *           + dma_unmap_sgtable() + sg_free_table() + __free_page() × N.
- *           sgt, pages, nr_pages hold the scatter-gather state.
+ * use_iommu_map selects the allocation path for large buffers:
+ *   true  — iommu_map() path (large allocations, Bug 55 rev 6).
+ *            Teardown: iommu_unmap() + vunmap() + __free_page() × N.
+ *            iommu_iova holds the manually-assigned IOVA base.
+ *   false — alloc_page() per page + dma_map_sgtable() path (small buffers).
+ *           Teardown: vunmap() + dma_unmap_sgtable() + sg_free_table() +
+ *           __free_page() × N.
+ *
+ * In both paths, pages[] and nr_pages track the physical pages.
  */
 struct rknpu_mem_buf {
 	struct rknpu_mem_object  mem;		/* MUST be first — cast target in submit */
 	struct device		*dev;		/* device for DMA ops */
-	bool			 use_noncontig;	/* true: dma_alloc_noncontiguous path */
-	/* noncontiguous path (large allocations) */
-	struct sg_table		*nc_sgt;
-	/* scatter-gather path (small allocations) */
-	struct sg_table		 sgt;
-	struct page		**pages;
-	unsigned long		 nr_pages;
+	bool			 use_iommu_map;	/* true: direct iommu_map large path */
+	unsigned long		 iommu_iova;	/* IOVA base (iommu_map path only) */
+	struct sg_table		 sgt;		/* scatter-gather (small path only) */
+	struct page		**pages;	/* physical pages (both paths) */
+	unsigned long		 nr_pages;	/* number of pages (both paths) */
 };
 
 static int rknpu_mem_obj_mmap(struct file *filp, struct vm_area_struct *vma)
 {
 	struct rknpu_mem_buf *buf = filp->private_data;
-	struct scatterlist *sg;
+	struct page **pages = buf->pages;
 	unsigned long addr = vma->vm_start;
-	int i;
+	unsigned long i;
 
 	vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
 
-	if (buf->use_noncontig) {
-		/*
-		 * Iterate the physical scatter entries (orig_nents) to remap
-		 * physical pages into the VMA.  The DMA entries (nents) reflect
-		 * the contiguous IOVA mapping and are not useful here.
-		 */
-		for_each_sg(buf->nc_sgt->sgl, sg, buf->nc_sgt->orig_nents, i) {
-			unsigned long len = sg->length;
-
-			if (remap_pfn_range(vma, addr,
-					    page_to_pfn(sg_page(sg)),
-					    len, vma->vm_page_prot))
-				return -EAGAIN;
-			addr += len;
-			if (addr >= vma->vm_end)
-				break;
-		}
-	} else {
-		for_each_sg(buf->sgt.sgl, sg, buf->sgt.nents, i) {
-			unsigned long len = sg->length;
-
-			if (remap_pfn_range(vma, addr,
-					    page_to_pfn(sg_page(sg)),
-					    len, vma->vm_page_prot))
-				return -EAGAIN;
-			addr += len;
-			if (addr >= vma->vm_end)
-				break;
-		}
+	for (i = 0; i < buf->nr_pages && addr < vma->vm_end; i++) {
+		if (remap_pfn_range(vma, addr, page_to_pfn(pages[i]),
+				    PAGE_SIZE, vma->vm_page_prot))
+			return -EAGAIN;
+		addr += PAGE_SIZE;
 	}
 	return 0;
 }
@@ -219,18 +231,21 @@ static int rknpu_mem_obj_release(struct inode *inode, struct file *filp)
 	struct rknpu_mem_buf *buf = filp->private_data;
 	unsigned long i;
 
-	if (buf->use_noncontig) {
-		dma_vunmap_noncontiguous(buf->dev, buf->mem.kv_addr);
-		dma_free_noncontiguous(buf->dev, buf->mem.size,
-				       buf->nc_sgt, DMA_BIDIRECTIONAL);
+	if (buf->use_iommu_map) {
+		struct iommu_domain *domain = iommu_get_domain_for_dev(buf->dev);
+
+		vunmap(buf->mem.kv_addr);
+		if (domain)
+			iommu_unmap(domain, buf->iommu_iova, buf->mem.size);
 	} else {
 		vunmap(buf->mem.kv_addr);
 		dma_unmap_sgtable(buf->dev, &buf->sgt, DMA_BIDIRECTIONAL, 0);
 		sg_free_table(&buf->sgt);
-		for (i = 0; i < buf->nr_pages; i++)
-			__free_page(buf->pages[i]);
-		vfree(buf->pages);
 	}
+
+	for (i = 0; i < buf->nr_pages; i++)
+		__free_page(buf->pages[i]);
+	vfree(buf->pages);
 	kfree(buf);
 	return 0;
 }
@@ -256,102 +271,129 @@ int rknpu_mem_create_ioctl(struct rknpu_device *rknpu_dev, struct file *file,
 	if (!buf)
 		return -ENOMEM;
 
-	buf->dev	 = rknpu_dev->dev;
-	buf->mem.flags	 = args.flags;
-	buf->mem.size	 = PAGE_ALIGN(args.size);
-	buf->nr_pages	 = buf->mem.size >> PAGE_SHIFT;
+	buf->dev      = rknpu_dev->dev;
+	buf->mem.flags = args.flags;
+	buf->mem.size  = PAGE_ALIGN(args.size);
+	buf->nr_pages  = buf->mem.size >> PAGE_SHIFT;
 
-	/*
-	 * Bug 55 rev 5: widen BOTH DMA masks to 40-bit on the FIRST allocation
-	 * (before any DMA operation touches the device) so the IOVA domain is
-	 * initialised with a 1 TB limit.  If this is done only in the large-
-	 * buffer branch (rev 3/4), the small buffer allocations that precede it
-	 * have already locked the IOVA domain to 32-bit.
-	 */
-	if (buf->dev->coherent_dma_mask < DMA_BIT_MASK(40)) {
-		if (!dma_set_mask_and_coherent(buf->dev, DMA_BIT_MASK(40)))
-			dev_info(buf->dev,
-				 "rknpu_mem: DMA mask widened to 40-bit\n");
+	/* Allocate physical pages (both paths). */
+	buf->pages = vmalloc(buf->nr_pages * sizeof(struct page *));
+	if (!buf->pages) {
+		kfree(buf);
+		return -ENOMEM;
+	}
+
+	for (i = 0; i < buf->nr_pages; i++) {
+		buf->pages[i] = alloc_page(GFP_KERNEL | __GFP_ZERO);
+		if (!buf->pages[i]) {
+			dev_err(buf->dev,
+				"rknpu_mem: alloc_page failed at %lu/%lu (size=%zu)\n",
+				i, buf->nr_pages, buf->mem.size);
+			ret = -ENOMEM;
+			goto err_free_pages;
+		}
 	}
 
 	if (buf->mem.size > RKNPU_MEM_LARGE_THR) {
 		/*
-		 * Bug 55 rev 3/5: large allocation path.
+		 * Bug 55 rev 6: large allocation path.
 		 *
-		 * dma_alloc_noncontiguous() maps physically-scattered pages into
-		 * a SINGLE contiguous IOVA range through the IOMMU page table.
-		 * The NPU hardware sees a flat [iova, iova + size) window.
-		 * The 40-bit mask widening above ensures the IOVA domain has
-		 * enough room for the 4 GB-aligned 2.4 GB window.
+		 * The Rockchip IOMMU has a 32-bit (4 GB) IOVA space.
+		 * dma_alloc_noncontiguous() requires 4 GB alignment for a
+		 * 2.4 GB buffer (size_aligned=true constraint), which is
+		 * impossible in a 4 GB domain (only valid 4 GB-aligned address
+		 * is 0x0 = reserved).
+		 *
+		 * Instead: assign a manually-managed IOVA from the bottom of
+		 * the address space (rknpu_iova_cursor, starting at 1 MB) and
+		 * map each physical page directly with iommu_map().  iommu_map()
+		 * has no alignment constraint beyond PAGE_SIZE.
+		 *
+		 * The DMA IOVA allocator works top-down (small allocs land near
+		 * 0xfe000000); our cursor grows bottom-up from 1 MB.  They do
+		 * not overlap for the typical use-case of one or two large
+		 * model-weight buffers.
 		 */
+		struct iommu_domain *domain;
+		unsigned long iova, mapped = 0;
+		unsigned long stride;
 
-		/*
-		 * Step 2: allocate scattered physical pages and map them into a
-		 * single contiguous IOVA range through the IOMMU page table.
-		 * sg_dma_address(nc_sgt->sgl) is the contiguous IOVA base; the
-		 * NPU hardware can access all model weights at [iova, iova+size).
-		 */
-		buf->use_noncontig = true;
-		dev_info(buf->dev,
-			 "rknpu_mem: noncontig alloc %zu bytes dma_mask=0x%llx\n",
-			 buf->mem.size,
-			 buf->dev->dma_mask ? *buf->dev->dma_mask : 0ULL);
-
-		buf->nc_sgt = dma_alloc_noncontiguous(buf->dev, buf->mem.size,
-						      DMA_BIDIRECTIONAL,
-						      GFP_KERNEL, 0);
-		if (!buf->nc_sgt) {
+		domain = iommu_get_domain_for_dev(buf->dev);
+		if (!domain) {
 			dev_err(buf->dev,
-				"rknpu_mem: dma_alloc_noncontiguous failed (size=%zu dma_mask=0x%llx)\n",
-				buf->mem.size,
-				buf->dev->dma_mask ? *buf->dev->dma_mask : 0ULL);
-			kfree(buf);
-			return -ENOMEM;
+				"rknpu_mem: iommu_get_domain_for_dev failed\n");
+			ret = -ENODEV;
+			goto err_free_pages;
 		}
 
-		buf->mem.dma_addr = sg_dma_address(buf->nc_sgt->sgl);
-		dev_info(buf->dev,
-			 "rknpu_mem: noncontig mapped OK dma_addr=0x%llx size=%zu\n",
-			 (u64)buf->mem.dma_addr, buf->mem.size);
+		stride = ALIGN(buf->mem.size, RKNPU_IOVA_ALIGN);
+		iova = (unsigned long)atomic64_fetch_add((s64)stride,
+							 &rknpu_iova_cursor);
+		buf->iommu_iova   = iova;
+		buf->use_iommu_map = true;
 
-		buf->mem.kv_addr = dma_vmap_noncontiguous(buf->dev,
-							  buf->mem.size,
-							  buf->nc_sgt);
+		dev_info(buf->dev,
+			 "rknpu_mem: iommu_map alloc %zu bytes iova=0x%lx (%lu pages)\n",
+			 buf->mem.size, iova, buf->nr_pages);
+
+		/* Map pages into the IOMMU page table, coalescing contiguous
+		 * physical runs to reduce iommu_map() call count. */
+		while (mapped < buf->nr_pages) {
+			unsigned long run = mapped;
+			phys_addr_t base = page_to_phys(buf->pages[mapped]);
+			size_t run_size;
+
+			/* Extend run while physically contiguous. */
+			while (mapped + 1 < buf->nr_pages &&
+			       page_to_phys(buf->pages[mapped + 1]) ==
+			       page_to_phys(buf->pages[mapped]) + PAGE_SIZE)
+				mapped++;
+
+			run_size = (mapped - run + 1) * PAGE_SIZE;
+			ret = iommu_map(domain,
+					iova + (run << PAGE_SHIFT),
+					base, run_size,
+					IOMMU_READ | IOMMU_WRITE | IOMMU_CACHE,
+					GFP_KERNEL);
+			if (ret) {
+				dev_err(buf->dev,
+					"rknpu_mem: iommu_map failed at iova=0x%lx size=%zu: %d\n",
+					iova + (run << PAGE_SHIFT), run_size,
+					ret);
+				/* Unmap what was already mapped. */
+				if (run > 0)
+					iommu_unmap(domain, iova,
+						    run << PAGE_SHIFT);
+				goto err_free_pages;
+			}
+			mapped++;
+		}
+
+		dev_info(buf->dev,
+			 "rknpu_mem: iommu_map OK iova=0x%lx size=%zu\n",
+			 iova, buf->mem.size);
+
+		buf->mem.dma_addr = (dma_addr_t)iova;
+
+		buf->mem.kv_addr = vmap(buf->pages, buf->nr_pages,
+					VM_MAP, PAGE_KERNEL);
 		if (!buf->mem.kv_addr) {
 			dev_err(buf->dev,
-				"rknpu_mem: dma_vmap_noncontiguous failed (size=%zu)\n",
-				buf->mem.size);
-			dma_free_noncontiguous(buf->dev, buf->mem.size,
-					       buf->nc_sgt, DMA_BIDIRECTIONAL);
-			kfree(buf);
-			return -ENOMEM;
+				"rknpu_mem: vmap failed (nr_pages=%lu)\n",
+				buf->nr_pages);
+			iommu_unmap(domain, iova, buf->mem.size);
+			ret = -ENOMEM;
+			goto err_free_pages;
 		}
 
 	} else {
 		/*
-		 * Small allocation path (≤ 256 MiB): allocate pages individually
-		 * and map them through the IOMMU with dma_map_sgtable().  For
-		 * small buffers the pages are typically physically contiguous
-		 * (nents=1) so the IOVA mapping is a single window and the NPU
+		 * Small allocation path (≤ 256 MiB): build sg_table from pages
+		 * and map through the DMA subsystem.  For small buffers the
+		 * buddy allocator typically returns physically-contiguous pages
+		 * (nents=1), so the IOVA mapping is a single window and the NPU
 		 * hardware accesses the buffer correctly.
 		 */
-		buf->pages = vmalloc(buf->nr_pages * sizeof(struct page *));
-		if (!buf->pages) {
-			kfree(buf);
-			return -ENOMEM;
-		}
-
-		for (i = 0; i < buf->nr_pages; i++) {
-			buf->pages[i] = alloc_page(GFP_KERNEL | __GFP_ZERO);
-			if (!buf->pages[i]) {
-				dev_err(buf->dev,
-					"rknpu_mem: alloc_page failed at %lu/%lu (size=%zu)\n",
-					i, buf->nr_pages, buf->mem.size);
-				ret = -ENOMEM;
-				goto err_free_pages;
-			}
-		}
-
 		ret = sg_alloc_table_from_pages(&buf->sgt, buf->pages,
 						buf->nr_pages,
 						0, buf->mem.size, GFP_KERNEL);
@@ -367,12 +409,12 @@ int rknpu_mem_create_ioctl(struct rknpu_device *rknpu_dev, struct file *file,
 			 buf->mem.size, buf->nr_pages,
 			 buf->dev->dma_mask ? *buf->dev->dma_mask : 0ULL);
 
-		ret = dma_map_sgtable(buf->dev, &buf->sgt, DMA_BIDIRECTIONAL, 0);
+		ret = dma_map_sgtable(buf->dev, &buf->sgt, DMA_BIDIRECTIONAL,
+				      0);
 		if (ret) {
 			dev_err(buf->dev,
-				"rknpu_mem: dma_map_sgtable failed: %d (size=%zu nents=%u dma_mask=0x%llx)\n",
-				ret, buf->mem.size, buf->sgt.nents,
-				buf->dev->dma_mask ? *buf->dev->dma_mask : 0ULL);
+				"rknpu_mem: dma_map_sgtable failed: %d (size=%zu nents=%u)\n",
+				ret, buf->mem.size, buf->sgt.nents);
 			goto err_free_sgt;
 		}
 
@@ -423,14 +465,14 @@ int rknpu_mem_create_ioctl(struct rknpu_device *rknpu_dev, struct file *file,
 	return 0;
 
 err_vunmap:
-	if (buf->use_noncontig) {
-		dma_vunmap_noncontiguous(buf->dev, buf->mem.kv_addr);
-		dma_free_noncontiguous(buf->dev, buf->mem.size,
-				       buf->nc_sgt, DMA_BIDIRECTIONAL);
-		kfree(buf);
-		return ret;
-	}
 	vunmap(buf->mem.kv_addr);
+	if (buf->use_iommu_map) {
+		struct iommu_domain *domain = iommu_get_domain_for_dev(buf->dev);
+
+		if (domain)
+			iommu_unmap(domain, buf->iommu_iova, buf->mem.size);
+		goto err_free_pages;
+	}
 err_unmap_sgt:
 	dma_unmap_sgtable(buf->dev, &buf->sgt, DMA_BIDIRECTIONAL, 0);
 err_free_sgt:
@@ -458,9 +500,9 @@ int rknpu_mem_destroy_ioctl(struct rknpu_device *rknpu_dev, struct file *file,
 int rknpu_mem_sync_ioctl(struct rknpu_device *rknpu_dev, unsigned long data)
 {
 	/*
-	 * Pages are allocated with GFP_KERNEL (cache-coherent on ARM64 with
-	 * SMMUv3); dma_map_sgtable() / dma_alloc_noncontiguous() handle
-	 * CPU/device sync via the DMA subsystem.  No explicit sync required.
+	 * Pages are allocated with GFP_KERNEL (cache-coherent on ARM64);
+	 * iommu_map() / dma_map_sgtable() handle CPU/device sync via the DMA
+	 * subsystem or IOMMU subsystem.  No explicit sync required.
 	 */
 	return 0;
 }
