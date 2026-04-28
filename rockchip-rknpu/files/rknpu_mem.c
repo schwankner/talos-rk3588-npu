@@ -457,6 +457,26 @@ int rknpu_mem_create_ioctl(struct rknpu_device *rknpu_dev, struct file *file,
 	 * and reads ->kv_addr to locate the command/task array.
 	 */
 	args.obj_addr = (u64)(uintptr_t)&buf->mem;
+	/*
+	 * Always report iommu_domain_id = 0 (the device's initial default
+	 * domain, registered in rknpu_iommu_init as iommu_domains[0] =
+	 * iommu_get_domain_for_dev()).
+	 *
+	 * Our iommu_map() / dma_map_sgtable() calls operate on the device's
+	 * current hardware domain, which is domain 0 for the entire lifetime
+	 * of the module.  When librknnrt.so submits a job with domain_id = 0,
+	 * rknpu_iommu_domain_get_and_switch() finds 0 == rknpu_dev->
+	 * iommu_domain_id and returns immediately (no switch), so the NPU
+	 * accesses our mappings in the existing page table.
+	 *
+	 * Without this, copy_to_user would echo back whatever value
+	 * librknnrt sent in the request.  librknnrt v2.3.x passes a
+	 * monotonically increasing domain counter (e.g. 10) which triggers
+	 * rknpu_iommu_switch_domain() → iommu_detach_device() + attach of a
+	 * freshly allocated empty domain → all IOVA mappings disappear →
+	 * task counter: 0.
+	 */
+	args.iommu_domain_id = 0;
 
 	if (copy_to_user((void __user *)data, &args, sizeof(args))) {
 		/* fd installed; caller must close to free memory */
