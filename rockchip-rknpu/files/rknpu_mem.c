@@ -172,6 +172,43 @@
  * domain the device actually operates in.  librknnrt then submits jobs with
  * iommu_domain_id=0, matching rknpu_dev->iommu_domain_id=0.
  *
+ * Bug 55 (fix, rev 9): "run task counter: 0, int status: 0" persists despite
+ * correct iommu_map() IOVA assignments and domain-id=0 synchronisation.
+ * Root cause: CPU cache coherency mismatch between three virtual aliases for
+ * the same physical pages:
+ *
+ *   (a) alloc_page(__GFP_ZERO) zeroes pages via the kernel direct map
+ *       (PAGE_KERNEL, writeback cacheable).  The L1/L2 caches now hold
+ *       clean zero lines for every page we allocated.
+ *
+ *   (b) librknnrt mmaps the anon-inode fd via rknpu_mem_obj_mmap(), which
+ *       uses pgprot_writecombine (Normal-NC on ARM64).  Write-combining
+ *       stores bypass L1/L2 caches and go directly to DRAM.  The CPU
+ *       caches still hold stale zeros.
+ *
+ *   (c) rknpu_job.c reads task struct fields (e.g. first_task->regcmd_addr)
+ *       via task_obj->kv_addr, which was vmap'd with PAGE_KERNEL
+ *       (writeback cacheable).  This hits L1/L2 caches — which still hold
+ *       the stale zero lines from step (a).  The kernel reads zero for all
+ *       task fields (regcmd_addr = 0, etc.).
+ *
+ *   (d) The kernel writes 0 to RKNPU_OFFSET_PC_DATA_ADDR.  The NPU
+ *       attempts to fetch register-command data from IOVA 0, which is
+ *       unmapped.  The Rockchip IOMMU silently drops the access.  The NPU
+ *       stalls and never fires a completion interrupt: int_status remains 0.
+ *
+ * librknnrt was written for Android where the DMA API allocates non-
+ * cacheable (Normal-NC) coherent memory; explicit RKNPU_MEM_SYNC calls are
+ * therefore not needed and librknnrt does not issue them for task-descriptor
+ * buffers.  Our alloc_page() + iommu_map() path uses ordinary cacheable
+ * pages, creating the alias conflict.
+ *
+ * Fix (rev 9): map kv_addr with pgprot_writecombine(PAGE_KERNEL) instead of
+ * PAGE_KERNEL.  Normal-NC reads bypass L1/L2 and fetch directly from DRAM,
+ * which holds the correct task data written by librknnrt via its own NC mmap.
+ * The DMA (NPU via IOMMU) accesses DRAM directly too — both sides now see the
+ * same DRAM content with no flush needed.
+ *
  * struct rknpu_mem_buf wraps rknpu_mem_object with the fields needed for
  * teardown.  rknpu_mem_object MUST remain the first member so that
  * (struct rknpu_mem_object *)obj_addr is the same address as
@@ -415,8 +452,15 @@ int rknpu_mem_create_ioctl(struct rknpu_device *rknpu_dev, struct file *file,
 
 		buf->mem.dma_addr = (dma_addr_t)iova;
 
+		/*
+		 * Bug 55 rev 9: use Normal-NC (write-combining) for kv_addr so
+		 * kernel reads in rknpu_job.c bypass L1/L2 caches and fetch
+		 * task data directly from DRAM, where librknnrt wrote it via its
+		 * own pgprot_writecombine mmap.  PAGE_KERNEL (writeback cached)
+		 * would return stale zeros left by alloc_page(__GFP_ZERO).
+		 */
 		buf->mem.kv_addr = vmap(buf->pages, buf->nr_pages,
-					VM_MAP, PAGE_KERNEL);
+					VM_MAP, pgprot_writecombine(PAGE_KERNEL));
 		if (!buf->mem.kv_addr) {
 			dev_err(buf->dev,
 				"rknpu_mem: vmap failed (nr_pages=%lu)\n",
@@ -464,8 +508,9 @@ int rknpu_mem_create_ioctl(struct rknpu_device *rknpu_dev, struct file *file,
 
 		buf->mem.dma_addr = sg_dma_address(buf->sgt.sgl);
 
+		/* Bug 55 rev 9: Normal-NC for the same coherency reason. */
 		buf->mem.kv_addr = vmap(buf->pages, buf->nr_pages,
-					VM_MAP, PAGE_KERNEL);
+					VM_MAP, pgprot_writecombine(PAGE_KERNEL));
 		if (!buf->mem.kv_addr) {
 			dev_err(buf->dev,
 				"rknpu_mem: vmap failed (nr_pages=%lu)\n",
@@ -573,17 +618,15 @@ int rknpu_mem_sync_ioctl(struct rknpu_device *rknpu_dev, unsigned long data)
 		 * the ARM64 cache-coherency domain, so cache maintenance must
 		 * be done explicitly.
 		 *
-		 * The mmap path uses pgprot_writecombine, which bypasses the
-		 * CPU cache on writes (data goes directly to DRAM).  However
-		 * the kernel's vmap alias (PAGE_KERNEL, cacheable) may hold
-		 * stale lines populated during __GFP_ZERO at allocation time.
-		 * flush_dcache_page() issues a clean+invalidate for each page,
-		 * ensuring that subsequent cacheable reads through kv_addr (in
-		 * rknpu_job.c) fetch the model data written by librknnrt.so
-		 * rather than the stale zero lines.
-		 *
-		 * Flush all pages regardless of direction: both TO_DEVICE and
-		 * FROM_DEVICE require coherent visibility of the full buffer.
+		 * kv_addr is now pgprot_writecombine (Normal-NC, Bug 55 rev 9),
+		 * so kernel reads in rknpu_job.c already bypass L1/L2 caches
+		 * and fetch directly from DRAM.  However the direct-map alias
+		 * (used by alloc_page/__GFP_ZERO) is still writeback-cacheable
+		 * and may hold stale lines.  flush_dcache_page() cleans and
+		 * invalidates those lines, ensuring any NPU writes to the buffer
+		 * (FROM_DEVICE) are visible when the CPU next reads via the
+		 * direct map, and preventing eviction of stale direct-map lines
+		 * from corrupting DRAM after librknnrt's NC writes.
 		 */
 		for (i = 0; i < buf->nr_pages; i++)
 			flush_dcache_page(buf->pages[i]);
