@@ -130,6 +130,25 @@
  *   4. vmap() the physical pages to provide a contiguous kernel virtual
  *      address (kv_addr) for rknpu_job.c.
  *
+ * Bug 55 (fix, rev 7): dma_map_sgtable() for medium-sized buffers (e.g.
+ * 80–150 MB) can return nents > 1 when the IOVA allocator (top-down from
+ * 4 GB) cannot find a single contiguous IOVA window of the required size due
+ * to IOVA fragmentation.  The NPU hardware accesses each buffer as a flat
+ * contiguous IOVA range starting at dma_addr; a mapping with nents=3 only
+ * covers the first physical run in IOVA space.  When the NPU reads or writes
+ * past that run it hits an unmapped IOVA → Rockchip IOMMU fault → DMA stall
+ * → run task counter: 0.  Confirmed: buffer 5 (126 MB) maps at
+ * dma_addr=0xd8000000 nents=3 every boot; inference always fails there.
+ *
+ * Fix (rev 7): route ALL allocations through the manual iommu_map() cursor
+ * path unconditionally (RKNPU_MEM_LARGE_THR = 0).  Change RKNPU_IOVA_ALIGN
+ * from 1 GB to PAGE_SIZE so the cursor advances by exactly the allocation
+ * size with no padding waste.  This guarantees a single contiguous IOVA
+ * region for every buffer regardless of physical memory layout.  The
+ * bottom-up cursor (starting at 1 MB) and the DMA allocator's top-down
+ * region remain non-overlapping for the typical rkllama/gemma2 workload
+ * (~2.8 GB total; cursor tops out at ~0xB5000000, well below 4 GB).
+ *
  * struct rknpu_mem_buf wraps rknpu_mem_object with the fields needed for
  * teardown.  rknpu_mem_object MUST remain the first member so that
  * (struct rknpu_mem_object *)obj_addr is the same address as
@@ -153,31 +172,28 @@
 #include "include/rknpu_mem.h"
 
 /*
- * Allocations above this threshold use the direct iommu_map() path to obtain
- * a contiguous IOVA range without the size-alignment constraint imposed by
- * the DMA IOVA allocator (Bug 55 rev 6).  Below the threshold the
- * alloc_page + dma_map_sgtable path produces nents=1 and works fine.
- * 256 MiB sits well above the largest observed small allocation (~80 MiB) and
- * well below the failing 2.4 GiB model-weight buffer.
+ * Bug 55 rev 7: route ALL allocations through iommu_map() by setting the
+ * threshold to 0 (condition buf->mem.size > 0 is always true for non-empty
+ * allocations).  dma_map_sgtable() can produce nents > 1 for medium buffers
+ * (IOVA fragmentation), causing NPU IOMMU faults.  The dma_map_sgtable path
+ * below is retained as dead code for reference only.
  */
-#define RKNPU_MEM_LARGE_THR  (256UL << 20)
+#define RKNPU_MEM_LARGE_THR  (0UL)
 
 /*
- * Manual IOVA allocator for large buffers (Bug 55 rev 6).
+ * Manual IOVA allocator for ALL allocations (Bug 55 rev 7: threshold = 0).
  *
- * RKNPU_IOVA_BASE: starting IOVA for large allocations.  1 MB keeps us well
- * above the IOMMU's reserved zero page while leaving room below the DMA
- * allocator's top-down allocations (first small alloc lands near 0xfe000000).
+ * RKNPU_IOVA_BASE: starting IOVA.  1 MB keeps us above the IOMMU's
+ * reserved zero page.  The DMA allocator (top-down from ~4 GB) is not used
+ * by our code any more, so there is no overlap concern.
  *
- * RKNPU_IOVA_ALIGN: stride between consecutive large allocations.  Rounding
- * each allocation up to 1 GB boundaries avoids fragmentation in the IOVA
- * space and keeps the cursor advancing in predictable steps.
- *
- * With 3 GB of usable IOVA below the first small allocation (~0xf8000000),
- * a single 2.4 GB allocation fits comfortably starting at 1 MB.
+ * RKNPU_IOVA_ALIGN: PAGE_SIZE — the cursor advances by exactly the
+ * allocation size (already page-aligned).  For a typical rkllama/gemma2
+ * workload (~2.8 GB total), the cursor tops out around 0xB5000000, well
+ * within the Rockchip IOMMU's 32-bit IOVA space.
  */
 #define RKNPU_IOVA_BASE   (1UL << 20)            /* 1 MB */
-#define RKNPU_IOVA_ALIGN  (1UL << 30)            /* 1 GB stride */
+#define RKNPU_IOVA_ALIGN  PAGE_SIZE              /* page-size stride, no waste */
 
 static atomic64_t rknpu_iova_cursor = ATOMIC64_INIT(RKNPU_IOVA_BASE);
 
@@ -457,38 +473,6 @@ int rknpu_mem_create_ioctl(struct rknpu_device *rknpu_dev, struct file *file,
 	 * and reads ->kv_addr to locate the command/task array.
 	 */
 	args.obj_addr = (u64)(uintptr_t)&buf->mem;
-	/*
-	 * Register the requested domain ID as an alias for domain 0 so that
-	 * rknpu_iommu_switch_domain() finds a non-NULL entry and performs a
-	 * harmless detach+reattach rather than allocating a fresh empty
-	 * domain (which would hide all our iommu_map() / dma_map_sgtable()
-	 * page-table entries).
-	 *
-	 * librknnrt.so v2.3.x uses a monotonically increasing internal
-	 * counter as iommu_domain_id (e.g. 10 by the time the 2.4 GiB
-	 * model-weight buffer is created) and echoes that counter back to
-	 * librknnrt via this field.  When the subsequent RKNPU_SUBMIT
-	 * specifies the same counter, rknpu_iommu_switch_domain(10) sees
-	 * iommu_domains[10] == iommu_domains[0] == the device's hardware
-	 * default domain, detaches and immediately re-attaches to the same
-	 * domain object (page table pointer unchanged), and the NPU can
-	 * access every entry that iommu_map() wrote.
-	 *
-	 * iommu_domains[0] is set during probe by rknpu_iommu_init_domain()
-	 * as iommu_get_domain_for_dev(), the same domain our iommu_map()
-	 * calls target.  We only populate the slot once (check for NULL) to
-	 * avoid clobbering any entry that the driver may have set itself.
-	 */
-	{
-		int req_id = args.iommu_domain_id;
-		struct iommu_domain *dom0 = rknpu_dev->iommu_domains[0];
-
-		if (req_id > 0 && req_id < RKNPU_MAX_IOMMU_DOMAIN_NUM &&
-		    dom0 && !rknpu_dev->iommu_domains[req_id])
-			rknpu_dev->iommu_domains[req_id] = dom0;
-		/* Echo args.iommu_domain_id back unchanged so librknnrt
-		 * stores the same ID for the subsequent RKNPU_SUBMIT. */
-	}
 
 	if (copy_to_user((void __user *)data, &args, sizeof(args))) {
 		/* fd installed; caller must close to free memory */
