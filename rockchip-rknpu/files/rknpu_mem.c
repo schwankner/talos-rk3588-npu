@@ -209,6 +209,12 @@
  * The DMA (NPU via IOMMU) accesses DRAM directly too — both sides now see the
  * same DRAM content with no flush needed.
  *
+ * Bug 55 (diagnostic, rev 11): add dev_info() in rknpu_job_subcore_commit_pc()
+ * to print first_task->regcmd_addr, first_task->int_mask, and
+ * args->task_base_addr at job commit time, so we can determine whether
+ * the stale-zero cache hypothesis (regcmd_addr=0) is confirmed or refuted.
+ * No functional change in rknpu_mem.c itself.
+ *
  * Bug 55 (fix, rev 10): "run task counter: 0" persists after rev 9.
  * Root cause: the ARM Cortex-A55 and A76 Technical Reference Manuals
  * explicitly state that Normal Non-Cacheable (NC) reads are
