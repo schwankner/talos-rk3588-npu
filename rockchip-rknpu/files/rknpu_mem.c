@@ -209,6 +209,34 @@
  * The DMA (NPU via IOMMU) accesses DRAM directly too — both sides now see the
  * same DRAM content with no flush needed.
  *
+ * Bug 55 (fix, rev 10): "run task counter: 0" persists after rev 9.
+ * Root cause: the ARM Cortex-A55 and A76 Technical Reference Manuals
+ * explicitly state that Normal Non-Cacheable (NC) reads are
+ * IMPLEMENTATION DEFINED with respect to existing cache contents:
+ *
+ *   "If a clean cache line exists in the cache for the address being
+ *    accessed, a non-cacheable read might return the cached value."
+ *
+ * alloc_page(__GFP_ZERO) zeroes pages via the writeback-cacheable direct
+ * map, depositing clean zero lines in L1/L2.  Rev 9's pgprot_writecombine
+ * kv_addr does NOT guarantee that reads bypass those existing lines.
+ * rknpu_job.c's read of first_task->regcmd_addr may still return stale
+ * zeros (→ IOVA 0 → NPU IOMMU fault → int_status: 0).
+ *
+ * Fix (rev 10): call flush_dcache_page() for each page immediately after
+ * alloc_page().  flush_dcache_page() issues ARM64 "DC CIVAC" (clean and
+ * invalidate to the Point of Coherency) for every cache line in the page.
+ * After this call, no valid L1/L2 lines exist for those physical pages.
+ * Between this flush and the later rknpu_job.c read via kv_addr, no kernel
+ * code accesses the page content via the direct map (vmap, iommu_map, and
+ * anon_inode_getfd touch only page tables, not page data).  librknnrt
+ * subsequently writes task data via its pgprot_writecombine mmap (→ DRAM
+ * directly).  When rknpu_job.c reads via kv_addr (Normal-NC), the L1/L2
+ * has no valid lines → guaranteed cold miss → fetches correct data from
+ * DRAM.  Belt-and-suspenders: pgprot_writecombine (rev 9) is retained for
+ * kv_addr so that, should any CPU speculatively re-populate a cache line
+ * with zeros before the job commit, the NC read still bypasses it.
+ *
  * struct rknpu_mem_buf wraps rknpu_mem_object with the fields needed for
  * teardown.  rknpu_mem_object MUST remain the first member so that
  * (struct rknpu_mem_object *)obj_addr is the same address as
@@ -369,6 +397,21 @@ int rknpu_mem_create_ioctl(struct rknpu_device *rknpu_dev, struct file *file,
 			ret = -ENOMEM;
 			goto err_free_pages;
 		}
+		/*
+		 * Bug 55 rev 10: clean and invalidate this page's cache lines.
+		 *
+		 * alloc_page(__GFP_ZERO) zeroes the page via the writeback-
+		 * cacheable direct map, leaving clean zero lines in L1/L2.
+		 * ARM Cortex-A55/A76 TRM: NC reads "might return the cached
+		 * value" if a clean line exists.  Invalidate here so that the
+		 * first kernel read via kv_addr (in rknpu_job_subcore_commit_pc)
+		 * is guaranteed to be a cold miss → DRAM → librknnrt's data.
+		 *
+		 * No kernel code accesses this page's content between here and
+		 * the job-commit read: vmap/iommu_map/anon_inode_getfd all
+		 * operate on page tables, not page data.
+		 */
+		flush_dcache_page(buf->pages[i]);
 	}
 
 	if (buf->mem.size > RKNPU_MEM_LARGE_THR) {
