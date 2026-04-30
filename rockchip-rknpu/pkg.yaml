@@ -419,6 +419,27 @@ steps:
         echo "BUG55 rev22 patch: OK"
         echo "BUG55 rev22 cache-buster: 2026-04-30-rk3588-state-init"
 
+        # Bug 55 rev 23: fix rk3588_state_init to call soft_reset on every power-on.
+        #
+        # Rev 22 analysis:
+        #   Writing 0x80000000 to core_base + 0x1024 has NO effect on IRS bits
+        #   30+31 on RK3588 (confirmed by "after=0xc0000000" == "before" in dmesg).
+        #   The RK3576 secondary register approach does not apply to RK3588.
+        #
+        # Root cause of Rev 22 regression:
+        #   state_init is called from rknpu_power_on(), which runs on EVERY
+        #   runtime PM resume (not just probe).  Rev 20 put soft_reset only in
+        #   probe.  After the NPU idle-suspends and resumes, state_init fires but
+        #   soft_reset does not → IRS bits 30+31 are restored by hardware reset →
+        #   core 0 rejects every job → 300-second inference timeout.
+        #
+        # Fix: replace the 0x1024 write with a soft_reset call inside state_init.
+        #   This ensures soft_reset fires on every power-on cycle (probe AND
+        #   runtime PM resume), clearing IRS before any job can be submitted.
+        python3 -c "import base64,sys; exec(base64.b64decode(b'aW1wb3J0IHN5cwpkID0gb3Blbignc3JjL3JrbnB1X2Rydi5jJykucmVhZCgpCgpubCA9IGNocig5MikgKyAnbicKCiMgUmV2IDIzOiByZXBsYWNlIHRoZSBib2R5IG9mIHJrMzU4OF9zdGF0ZV9pbml0LgojIFJldiAyMiBwcm92ZWQgdGhhdCB3cml0aW5nIDB4ODAwMDAwMDAgdG8gY29yZV9iYXNlICsgMHgxMDI0IGhhcyBubyBlZmZlY3QKIyBvbiBJUlMgYml0cyAzMCszMS4gIFRoZSByZWFsIGlzc3VlOiBzdGF0ZV9pbml0IGlzIGNhbGxlZCBmcm9tIHJrbnB1X3Bvd2VyX29uCiMgKHdoaWNoIHJ1bnMgYWZ0ZXIgZXZlcnkgcnVudGltZSBQTSByZXN1bWUpLCBidXQgcmtucHVfc29mdF9yZXNldCB3YXMgb25seQojIGNhbGxlZCBhdCBwcm9iZSB0aW1lIChSZXYgMjApLiAgQWZ0ZXIgYSBQTSBzdXNwZW5kK3Jlc3VtZSwgSVJTIGJpdHMgY29tZQojIGJhY2sgYW5kIG5vIHNvZnRfcmVzZXQgcnVucywgc28gY29yZSAwIHJlamVjdHMgZXZlcnkgam9iICh0aW1lb3V0KS4KIyBGaXg6IGNhbGwgc29mdF9yZXNldCBmcm9tIHN0YXRlX2luaXQgc28gaXQgZmlyZXMgb24gZXZlcnkgcG93ZXItb24uCm9sZCA9ICgKICAgICdzdGF0aWMgdm9pZCByazM1ODhfc3RhdGVfaW5pdChzdHJ1Y3QgcmtucHVfZGV2aWNlICpya25wdV9kZXYpJyArIGNocigxMCkKICAgICsgJ3snICsgY2hyKDEwKQogICAgKyBjaHIoOSkgKyAnaW50IGk7JyArIGNocigxMCkKICAgICsgY2hyKDEwKQogICAgKyBjaHIoOSkgKyAnZm9yIChpID0gMDsgaSA8IHJrbnB1X2Rldi0+Y29uZmlnLT5udW1faXJxczsgaSsrKSB7JyArIGNocigxMCkKICAgICsgY2hyKDkpICsgY2hyKDkpICsgJ3UzMiBpcnNfYmVmb3JlID0gcmVhZGwocmtucHVfZGV2LT5iYXNlW2ldICsgMHgyYyk7JyArIGNocigxMCkKICAgICsgY2hyKDEwKQogICAgKyBjaHIoOSkgKyBjaHIoOSkgKyAnd3JpdGVsKDB4ODAwMDAwMDAsIHJrbnB1X2Rldi0+YmFzZVtpXSArIDB4MTAyNCk7JyArIGNocigxMCkKICAgICsgY2hyKDkpICsgY2hyKDkpICsgJ2Rldl9pbmZvKHJrbnB1X2Rldi0+ZGV2LCcgKyBjaHIoMTApCiAgICArIGNocig5KSArIGNocig5KSArIGNocig5KSArICcgIkJ1ZzU1IHIyMjogY29yZSVkIElSUyBiZWZvcmU9MHgleCBhZnRlcj0weCV4JyArIG5sICsgJyIsJyArIGNocigxMCkKICAgICsgY2hyKDkpICsgY2hyKDkpICsgY2hyKDkpICsgJyBpLCBpcnNfYmVmb3JlLCByZWFkbChya25wdV9kZXYtPmJhc2VbaV0gKyAweDJjKSk7JyArIGNocigxMCkKICAgICsgY2hyKDkpICsgJ30nICsgY2hyKDEwKQogICAgKyAnfScgKyBjaHIoMTApCikKbmV3ID0gKAogICAgJy8qIEJ1ZyA1NSByZXYgMjM6IGNsZWFyIHN0aWNreSBJTlRfUkFXX1NUQVRVUyBmYXVsdCBiaXRzIGFmdGVyIGV2ZXJ5JyArIGNocigxMCkKICAgICsgJyAqIHBvd2VyLW9uLiAgUmV2IDIyIGNvbmZpcm1lZCB0aGF0IHdyaXRpbmcgdG8gY29yZV9iYXNlICsgMHgxMDI0IGhhcycgKyBjaHIoMTApCiAgICArICcgKiBubyBlZmZlY3Qgb24gSVJTIGJpdHMgMzArMzEgb24gUkszNTg4LiAgVGhlIHJvb3QgaXNzdWU6IHN0YXRlX2luaXQnICsgY2hyKDEwKQogICAgKyAnICogaXMgY2FsbGVkIGZyb20gcmtucHVfcG93ZXJfb24gKGV2ZXJ5IHJ1bnRpbWUgUE0gcmVzdW1lKSwgYnV0JyArIGNocigxMCkKICAgICsgJyAqIHJrbnB1X3NvZnRfcmVzZXQgd2FzIG9ubHkgY2FsbGVkIGF0IHByb2JlIHRpbWUgKHJldiAyMCkuICBBZnRlciBhJyArIGNocigxMCkKICAgICsgJyAqIFBNIHN1c3BlbmQrcmVzdW1lIHRoZSBzdGlja3kgRE1BLWZhdWx0IGJpdCAoYml0IDMxKSByZXR1cm5zIG9uJyArIGNocigxMCkKICAgICsgJyAqIGNvcmUgMCB3aXRoIG5vIHNvZnRfcmVzZXQgdG8gY2xlYXIgaXQsIHNvIGV2ZXJ5IHN1Ym1pdHRlZCBqb2IgaXMnICsgY2hyKDEwKQogICAgKyAnICogaW1tZWRpYXRlbHkgcmVqZWN0ZWQgKHJ1bl90YXNrX2NvdW50ZXIgc3RheXMgMCwgdGltZW91dCkuJyArIGNocigxMCkKICAgICsgJyAqIEZpeDogY2FsbCBzb2Z0X3Jlc2V0IGZyb20gc3RhdGVfaW5pdCBzbyBpdCBydW5zIG9uIGV2ZXJ5IHBvd2VyLW9uLiAqLycgKyBjaHIoMTApCiAgICArICdzdGF0aWMgdm9pZCByazM1ODhfc3RhdGVfaW5pdChzdHJ1Y3QgcmtucHVfZGV2aWNlICpya25wdV9kZXYpJyArIGNocigxMCkKICAgICsgJ3snICsgY2hyKDEwKQogICAgKyBjaHIoOSkgKyAnaW50IGk7JyArIGNocigxMCkKICAgICsgY2hyKDEwKQogICAgKyBjaHIoOSkgKyAncmtucHVfc29mdF9yZXNldChya25wdV9kZXYpOycgKyBjaHIoMTApCiAgICArIGNocig5KSArICdmb3IgKGkgPSAwOyBpIDwgcmtucHVfZGV2LT5jb25maWctPm51bV9pcnFzOyBpKyspJyArIGNocigxMCkKICAgICsgY2hyKDkpICsgY2hyKDkpICsgJ2Rldl9pbmZvKHJrbnB1X2Rldi0+ZGV2LCcgKyBjaHIoMTApCiAgICArIGNocig5KSArIGNocig5KSArIGNocig5KSArICcgIkJ1ZzU1IHIyMzogY29yZSVkIElSUyBhZnRlcl9yZXNldD0weCV4JyArIG5sICsgJyIsJyArIGNocigxMCkKICAgICsgY2hyKDkpICsgY2hyKDkpICsgY2hyKDkpICsgJyBpLCByZWFkbChya25wdV9kZXYtPmJhc2VbaV0gKyAweDJjKSk7JyArIGNocigxMCkKICAgICsgJ30nICsgY2hyKDEwKQopCmFzc2VydCBvbGQgaW4gZCwgJ1BBVENIIEZBSUxFRDogcmszNTg4X3N0YXRlX2luaXQgcmV2MjIgYm9keSBub3QgZm91bmQgaW4gcmtucHVfZHJ2LmMnCmQgPSBkLnJlcGxhY2Uob2xkLCBuZXcsIDEpCm9wZW4oJ3NyYy9ya25wdV9kcnYuYycsICd3Jykud3JpdGUoZCkKc3lzLmV4aXQoMCBpZiAnQnVnNTUgcjIzJyBpbiBkIGFuZCAncmtucHVfc29mdF9yZXNldChya25wdV9kZXYpJyBpbiBkIGVsc2UgMSkK').decode())"
+        echo "BUG55 rev23 patch: OK"
+        echo "BUG55 rev23 cache-buster: 2026-05-01-state-init-soft-reset"
+
     build:
       - |
         # Diagnostic: confirm Kbuild content visible to the build step.
