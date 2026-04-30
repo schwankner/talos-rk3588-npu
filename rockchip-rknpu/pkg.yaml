@@ -369,6 +369,34 @@ steps:
         echo "BUG55 rev20 patch: OK"
         echo "BUG55 rev20 cache-buster: 2026-04-30-probe-soft-reset"
 
+        # Bug 55 rev 21: acknowledge sticky fault bits 30+31 (ILLEGAL_PARAM /
+        # DMA fault) in INT_RAW_STATUS before writing OP_EN.
+        #
+        # Root cause analysis:
+        #   The NPU hardware reset default state has bit 30 (ILLEGAL_PARAM) and
+        #   bit 31 (DMA fault) set in INT_RAW_STATUS on core 0, and bit 30 set
+        #   on cores 1 and 2.  The existing job init path writes
+        #   int_mask=0x300 (bits 8+9 = job-done IRQ enables) to INT_CLEAR.
+        #   Bits 30 and 31 are outside the INT_CLEAR domain of bits 8+9 and
+        #   are therefore never cleared.  With bit 31 (DMA fault) still set at
+        #   OP_EN time, the hardware sees an active DMA fault condition and
+        #   refuses to start the job on core 0 — run_task_counter stays 0, no
+        #   completion IRQ ever fires, and the job times out.
+        #
+        #   Evidence: core 2 has only bit 30 set and still accepts OP_EN
+        #   (bit 30 is cleared after OP_EN → job starts).  Core 0 has BOTH
+        #   bits 30 and 31, and the bits remain unchanged after OP_EN → job
+        #   rejected.  Bit 31 (DMA fault) is the blocker.
+        #
+        # Fix: write 0xffffffff to INT_CLEAR before the normal int_mask write.
+        # INT_CLEAR is a write-1-to-clear register; this acknowledges all
+        # interrupt bits including 30+31, removing the fault condition that
+        # blocks OP_EN.  A diagnostic print of INT_RAW_STATUS immediately
+        # after the full clear reveals whether this succeeds.
+        python3 -c "import base64,sys; exec(base64.b64decode(b'aW1wb3J0IHN5cwpkID0gb3Blbignc3JjL3JrbnB1X2pvYi5jJykucmVhZCgpCgpubCA9IGNocig5MikgKyAnbicKCiMgUmV2IDIxOiB3cml0ZSAweGZmZmZmZmZmIHRvIElOVF9DTEVBUiBiZWZvcmUgT1BfRU4gdG8gYXR0ZW1wdCBjbGVhcmluZwojIHN0aWNreSBiaXRzIDMwKzMxIHRoYXQgYXJlIHByZXNlbnQgaW4gdGhlIGhhcmR3YXJlIHJlc2V0IGRlZmF1bHQgc3RhdGUuCm9sZCA9ICgKICAgICdcdFJFR19XUklURShsYXN0X3Rhc2stPmludF9tYXNrLCBSS05QVV9PRkZTRVRfSU5UX01BU0spO1xuJwogICAgJ1xuJwogICAgJ1x0UkVHX1dSSVRFKGZpcnN0X3Rhc2stPmludF9tYXNrLCBSS05QVV9PRkZTRVRfSU5UX0NMRUFSKTtcbicKKQpuZXcgPSAoCiAgICAnXHRSRUdfV1JJVEUobGFzdF90YXNrLT5pbnRfbWFzaywgUktOUFVfT0ZGU0VUX0lOVF9NQVNLKTtcbicKICAgICdcbicKICAgICdcdC8qIEJ1ZyA1NSByZXYgMjE6IGFja25vd2xlZGdlIHN0aWNreSBmYXVsdCBiaXRzIDMwKzMxIGJlZm9yZSBPUF9FTi5cbicKICAgICdcdCAqIFRoZSBOUFUgaGFyZHdhcmUgcmVzZXQgZGVmYXVsdCBoYXMgYml0cyAzMCAoSUxMRUdBTF9QQVJBTSkgYW5kIDMxXG4nCiAgICAnXHQgKiAoRE1BIGZhdWx0KSBzZXQgaW4gSU5UX1JBV19TVEFUVVMgb24gY29yZSAwLCBhbmQgYml0IDMwIHNldCBvblxuJwogICAgJ1x0ICogY29yZXMgMSsyLiAgVGhlIG5vcm1hbCBpbnRfbWFzaz0weDMwMCB3cml0ZSB0byBJTlRfQ0xFQVIgb25seSBjb3ZlcnNcbicKICAgICdcdCAqIGJpdHMgOCs5IChqb2ItZG9uZSBJUlEpOyBiaXRzIDMwKzMxIHJlbWFpbiBzZXQgYW5kIGNhdXNlIHRoZSBoYXJkd2FyZVxuJwogICAgJ1x0ICogdG8gcmVqZWN0IE9QX0VOIG9uIGNvcmUgMCAocnVuX3Rhc2tfY291bnRlciBzdGF5cyAwLCBubyBJUlEgZmlyZXMpLlxuJwogICAgJ1x0ICogV3JpdGluZyAweGZmZmZmZmZmIHRvIElOVF9DTEVBUiBhdHRlbXB0cyB0byBhY2tub3dsZWRnZSBhbGwgYml0c1xuJwogICAgJ1x0ICogaW5jbHVkaW5nIDMwKzMxIHZpYSB0aGUgd3JpdGUtMS10by1jbGVhciBtZWNoYW5pc20uICovXG4nCiAgICAnXHRSRUdfV1JJVEUoMHhmZmZmZmZmZiwgUktOUFVfT0ZGU0VUX0lOVF9DTEVBUik7XG4nCiAgICAnXHR7XG4nCiAgICAnXHRcdC8qIEJ1ZyA1NSByZXYgMjEgZGlhZ25vc3RpYzogSVJTIGFmdGVyIGZ1bGwgSU5UX0NMRUFSICovXG4nCiAgICAnXHRcdGRldl9pbmZvKHJrbnB1X2Rldi0+ZGV2LCAiQlVHNTUgcjIxOiBjaT0lZCBpcnNfYWZ0ZXJfZnVsbF9jbHI9MHgleCcgKyBubCArICciLFxuJwogICAgJ1x0XHRcdCBjb3JlX2luZGV4LCBSRUdfUkVBRChSS05QVV9PRkZTRVRfSU5UX1JBV19TVEFUVVMpKTtcbicKICAgICdcdH1cbicKICAgICdcdFJFR19XUklURShmaXJzdF90YXNrLT5pbnRfbWFzaywgUktOUFVfT0ZGU0VUX0lOVF9DTEVBUik7XG4nCikKYXNzZXJ0IG9sZCBpbiBkLCAnUEFUQ0ggRkFJTEVEOiBJTlRfTUFTSy9JTlRfQ0xFQVIgYW5jaG9yIG5vdCBmb3VuZCBpbiBya25wdV9qb2IuYycKZCA9IGQucmVwbGFjZShvbGQsIG5ldywgMSkKb3Blbignc3JjL3JrbnB1X2pvYi5jJywgJ3cnKS53cml0ZShkKQpzeXMuZXhpdCgwIGlmICdCVUc1NSByMjEnIGluIGQgZWxzZSAxKQo=').decode())"
+        echo "BUG55 rev21 patch: OK"
+        echo "BUG55 rev21 cache-buster: 2026-04-30-full-int-clear"
+
     build:
       - |
         # Diagnostic: confirm Kbuild content visible to the build step.
