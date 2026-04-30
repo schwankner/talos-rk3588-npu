@@ -341,6 +341,34 @@ steps:
         echo "BUG55 rev19 patch: OK"
         echo "BUG55 rev19 cache-buster: 2026-04-30-sync-target-core-fix"
 
+        # Bug 55 rev 20: call rknpu_soft_reset() at probe time to clear the
+        # hardware's sticky INT_RAW_STATUS fault bits before any job runs.
+        #
+        # Root cause (confirmed from dmesg of very first job after boot):
+        #   r16a: ci=0 irs_pre=0xc0000000  (bits 30+31 SET at cold reset)
+        #   r16a: ci=1 irs_pre=0x40000000  (bit 30 set)
+        #   r16a: ci=2 irs_pre=0x40000000  (bit 30 set)
+        #
+        # Bits 30 (ILLEGAL_PARAM) and 31 (DMA fault) are set in INT_RAW_STATUS
+        # from the moment the hardware powers on — NOT from any previous job.
+        # Writing INT_CLEAR (int_mask=0x300) does NOT clear bits 30+31; they
+        # are latched by the hardware reset state and are only cleared by a
+        # full soft reset.  With bit 30 set on core 0 at job commit time, the
+        # hardware treats the job parameters as illegal, rejects the dispatch,
+        # and run_task_counter remains 0 — so no IRQ ever fires, the job times
+        # out, and inference fails with "failed to submit!".
+        #
+        # Fix: call rknpu_soft_reset() once during probe, after rknpu_power_on()
+        # and clk_bulk_prepare_enable() (Bug 27) have brought the hardware up,
+        # so the reset sequence can write the NPU control registers safely.
+        # This clears the sticky bits on all three cores before the first
+        # RKNPU_SUBMIT ioctl arrives.  rknpu_soft_reset() is already called on
+        # job timeout (rknpu_job.c lines 622, 737) so calling it at probe is
+        # the same mechanism applied one step earlier.
+        python3 -c "import base64,sys; exec(base64.b64decode(b'aW1wb3J0IHN5cwpkID0gb3Blbignc3JjL3JrbnB1X2Rydi5jJykucmVhZCgpCgpubCA9IGNocig5MikgKyAnbicKb2xkID0gJ1x0Y2xrX2J1bGtfcHJlcGFyZV9lbmFibGUocmtucHVfZGV2LT5udW1fY2xrcywgcmtucHVfZGV2LT5jbGtzKTtcbicKbmV3ID0gKAogICAgJ1x0Y2xrX2J1bGtfcHJlcGFyZV9lbmFibGUocmtucHVfZGV2LT5udW1fY2xrcywgcmtucHVfZGV2LT5jbGtzKTtcbicKICAgICdcdC8qIEJ1ZyA1NSByZXYgMjA6IGNsZWFyIGhhcmR3YXJlIElOVF9SQVdfU1RBVFVTIGZhdWx0IGJpdHMgYmVmb3JlIGZpcnN0IGpvYi5cbicKICAgICdcdCAqIEF0IGNvbGQgYm9vdC9yZXNldCBjb3JlIDAgc3RhcnRzIHdpdGggYml0cyAzMCszMSBzZXQgKDB4YzAwMDAwMDA6XG4nCiAgICAnXHQgKiBJTExFR0FMX1BBUkFNICsgRE1BIGZhdWx0KTsgY29yZXMgMS8yIHN0YXJ0IHdpdGggYml0IDMwIHNldCAoMHg0MDAwMDAwMCkuXG4nCiAgICAnXHQgKiBUaGVzZSBzdGlja3kgYml0cyBDQU5OT1QgYmUgY2xlYXJlZCB2aWEgSU5UX0NMRUFSIHdyaXRlczsgb25seVxuJwogICAgJ1x0ICogcmtucHVfc29mdF9yZXNldCgpIGZsdXNoZXMgdGhlbS4gIFdpdGggdGhlbSBzZXQgZXZlcnkgam9iIHN1Ym1pdHRlZFxuJwogICAgJ1x0ICogb24gY29yZSAwIGlzIGltbWVkaWF0ZWx5IHJlamVjdGVkIGFuZCBydW5fdGFza19jb3VudGVyIHN0YXlzIDAuXG4nCiAgICAnXHQgKiBDYWxsaW5nIHNvZnRfcmVzZXQgaGVyZSAoYWZ0ZXIgcG93ZXJfb24gYW5kIGNsb2NrcyBzdGFibGUpIGVuc3VyZXNcbicKICAgICdcdCAqIHRoZSBOUFUgaGFyZHdhcmUgc3RhcnRzIGluIGEgY2xlYW4gc3RhdGUgYmVmb3JlIGFueSBqb2IgcnVucy4gKi9cbicKICAgICdcdHJrbnB1X3NvZnRfcmVzZXQocmtucHVfZGV2KTtcbicKICAgICdcdGRldl9pbmZvKGRldiwgIkJ1ZzU1IHIyMDogcHJvYmUgc29mdF9yZXNldCBkb25lJyArIG5sICsgJyIpO1xuJwopCmFzc2VydCBvbGQgaW4gZCwgJ1BBVENIIEZBSUxFRDogQnVnMjcgY2xrX2J1bGtfcHJlcGFyZV9lbmFibGUgbm90IGZvdW5kIGluIHJrbnB1X2Rydi5jJwpkID0gZC5yZXBsYWNlKG9sZCwgbmV3LCAxKQpvcGVuKCdzcmMvcmtucHVfZHJ2LmMnLCAndycpLndyaXRlKGQpCnN5cy5leGl0KDAgaWYgJ3JrbnB1X3NvZnRfcmVzZXQocmtucHVfZGV2KScgaW4gZCBlbHNlIDEpCg==').decode())"
+        echo "BUG55 rev20 patch: OK"
+        echo "BUG55 rev20 cache-buster: 2026-04-30-probe-soft-reset"
+
     build:
       - |
         # Diagnostic: confirm Kbuild content visible to the build step.
