@@ -488,6 +488,29 @@ steps:
         echo "BUG55 rev25 patch: OK"
         echo "BUG55 rev25 cache-buster: 2026-05-01-skip-iommu-detach-reattach"
 
+        # Bug 55 rev 26: remove the probe-time soft_reset call added by Rev 20.
+        #
+        # Rev 20 was based on the incorrect theory that IRS bits 30+31 block job
+        # submission.  Rev 24's diagnostic disproved this: ci=2's IRS auto-clears
+        # to 0x0 at OP_EN time yet run_task_counter stays 0 → IRS is not the
+        # blocking factor.
+        #
+        # Root cause: rknpu_soft_reset() does a CRU assert/deassert which resets
+        # the NPU hardware including the NPU-side TBU (Translation Buffer Unit)
+        # that connects to the ARM SMMUv3.  After CRU deassert the TBU is in an
+        # unconfigured state; the external ARM SMMUv3 is NOT reset and does not
+        # automatically reconfigure the TBU.  Result: all NPU DMA IOVA translations
+        # fail — run_task_counter stays 0 on every core (300 s timeout).
+        #
+        # At cold boot the NPU is already in a known clean state: rknpu_power_on()
+        # sets up the ARM SMMUv3 DMA context correctly, and the hardware starts up
+        # without any IRS fault bits being a problem (Revs 1-19 worked without any
+        # probe soft_reset).  Rev 20's probe soft_reset actively broke NPU DMA by
+        # disrupting the TBU → SMMUv3 connection.
+        python3 -c "import base64,sys; exec(base64.b64decode(b'aW1wb3J0IHN5cwoKZCA9IG9wZW4oJ3NyYy9ya25wdV9kcnYuYycpLnJlYWQoKQoKbmwgPSBjaHIoOTIpICsgJ24nICAjICdcbicgYXMgaXQgYXBwZWFycyBpbiBDIHN0cmluZyBsaXRlcmFscwoKIyBSZXYgMjY6IHJlbW92ZSB0aGUgcHJvYmUtdGltZSBzb2Z0X3Jlc2V0IGJsb2NrIGluc2VydGVkIGJ5IFJldiAyMC4KIwojIFJldiAyMCB3YXMgYmFzZWQgb24gdGhlIGluY29ycmVjdCB0aGVvcnkgdGhhdCBJUlMgYml0cyAzMCszMSBibG9jayBqb2IKIyBzdWJtaXNzaW9uLiAgUmV2IDI0J3MgZGlhZ25vc3RpYyBkaXNwcm92ZWQgdGhpczogY2k9MidzIElSUyBhdXRvLWNsZWFycwojIHRvIDB4MCBhdCBPUF9FTiB0aW1lIGJ1dCBydW5fdGFza19jb3VudGVyIHN0aWxsIHN0YXlzIDAgLS0gcHJvdmluZyBJUlMKIyBpcyBub3QgdGhlIGJsb2NraW5nIGZhY3Rvci4KIwojIFJvb3QgY2F1c2U6IHJrbnB1X3NvZnRfcmVzZXQoKSBkb2VzIGEgQ1JVIGFzc2VydC9kZWFzc2VydCB3aGljaCBwaHlzaWNhbGx5CiMgcmVzZXRzIHRoZSBOUFUgaGFyZHdhcmUgaW5jbHVkaW5nIHRoZSBOUFUtc2lkZSBUQlUgKFRyYW5zbGF0aW9uIEJ1ZmZlciBVbml0KQojIHRoYXQgY29ubmVjdHMgdG8gdGhlIEFSTSBTTU1VdjMuICBBZnRlciBDUlUgZGVhc3NlcnQgdGhlIFRCVSBpcyBpbiBhbgojIHVuY29uZmlndXJlZCBzdGF0ZTsgdGhlIGV4dGVybmFsIEFSTSBTTU1VdjMgaXMgbm90IHJlc2V0IGFuZCBkb2VzIG5vdAojIGF1dG9tYXRpY2FsbHkgcmVjb25maWd1cmUgdGhlIFRCVS4gIFJlc3VsdDogYWxsIE5QVSBETUEgSU9WQSB0cmFuc2xhdGlvbnMKIyBmYWlsLCBydW5fdGFza19jb3VudGVyIHN0YXlzIDAgb24gZXZlcnkgY29yZSAoMzAwIHMgdGltZW91dCkuCiMKIyBUaGUgTlBVIGlzIGFscmVhZHkgaW4gYSBrbm93biBjbGVhbiBzdGF0ZSBhdCBjb2xkIGJvb3QgLS0gcmtucHVfcG93ZXJfb24oKQojIHNldHMgdXAgdGhlIEFSTSBTTU1VdjMgRE1BIGNvbnRleHQgY29ycmVjdGx5LiAgUmV2IDIwJ3MgcHJvYmUgc29mdF9yZXNldAojIGlzIHVubmVjZXNzYXJ5IGFuZCBoYXJtZnVsIG9uIG1haW5saW5lIGtlcm5lbCA2LjE4IHdpdGggQVJNIFNNTVV2My4KIyBSZXZlcnRzIFJldiAyMC4KCm9sZCA9ICgKICAgICdcdC8qIEJ1ZyA1NSByZXYgMjA6IGNsZWFyIGhhcmR3YXJlIElOVF9SQVdfU1RBVFVTIGZhdWx0IGJpdHMgYmVmb3JlIGZpcnN0IGpvYi5cbicKICAgICdcdCAqIEF0IGNvbGQgYm9vdC9yZXNldCBjb3JlIDAgc3RhcnRzIHdpdGggYml0cyAzMCszMSBzZXQgKDB4YzAwMDAwMDA6XG4nCiAgICAnXHQgKiBJTExFR0FMX1BBUkFNICsgRE1BIGZhdWx0KTsgY29yZXMgMS8yIHN0YXJ0IHdpdGggYml0IDMwIHNldCAoMHg0MDAwMDAwMCkuXG4nCiAgICAnXHQgKiBUaGVzZSBzdGlja3kgYml0cyBDQU5OT1QgYmUgY2xlYXJlZCB2aWEgSU5UX0NMRUFSIHdyaXRlczsgb25seVxuJwogICAgJ1x0ICogcmtucHVfc29mdF9yZXNldCgpIGZsdXNoZXMgdGhlbS4gIFdpdGggdGhlbSBzZXQgZXZlcnkgam9iIHN1Ym1pdHRlZFxuJwogICAgJ1x0ICogb24gY29yZSAwIGlzIGltbWVkaWF0ZWx5IHJlamVjdGVkIGFuZCBydW5fdGFza19jb3VudGVyIHN0YXlzIDAuXG4nCiAgICAnXHQgKiBDYWxsaW5nIHNvZnRfcmVzZXQgaGVyZSAoYWZ0ZXIgcG93ZXJfb24gYW5kIGNsb2NrcyBzdGFibGUpIGVuc3VyZXNcbicKICAgICdcdCAqIHRoZSBOUFUgaGFyZHdhcmUgc3RhcnRzIGluIGEgY2xlYW4gc3RhdGUgYmVmb3JlIGFueSBqb2IgcnVucy4gKi9cbicKICAgICdcdHJrbnB1X3NvZnRfcmVzZXQocmtucHVfZGV2KTtcbicKICAgICdcdGRldl9pbmZvKGRldiwgIkJ1ZzU1IHIyMDogcHJvYmUgc29mdF9yZXNldCBkb25lJyArIG5sICsgJyIpO1xuJwopCgphc3NlcnQgb2xkIGluIGQsICdQQVRDSCBGQUlMRUQ6IFJldiAyMCBwcm9iZSBzb2Z0X3Jlc2V0IGJsb2NrIG5vdCBmb3VuZCBpbiBya25wdV9kcnYuYycKZCA9IGQucmVwbGFjZShvbGQsICcnLCAxKQpvcGVuKCdzcmMvcmtucHVfZHJ2LmMnLCAndycpLndyaXRlKGQpCm9rID0gJ0J1ZzU1IHIyMCcgbm90IGluIGQgYW5kICdCdWcgNTUgcmV2IDIwJyBub3QgaW4gZApzeXMuZXhpdCgwIGlmIG9rIGVsc2UgMSkK').decode())"
+        echo "BUG55 rev26 patch: OK"
+        echo "BUG55 rev26 cache-buster: 2026-05-01-remove-probe-soft-reset"
+
     build:
       - |
         # Diagnostic: confirm Kbuild content visible to the build step.
