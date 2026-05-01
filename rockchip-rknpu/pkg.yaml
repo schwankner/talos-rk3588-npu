@@ -511,6 +511,36 @@ steps:
         echo "BUG55 rev26 patch: OK"
         echo "BUG55 rev26 cache-buster: 2026-05-01-remove-probe-soft-reset"
 
+        # Bug 55 rev 27: revert Rev 25 — restore iommu_detach_device +
+        #   iommu_attach_device in rknpu_soft_reset().
+        #
+        # Rev 25 removed these calls based on the incorrect belief that
+        # the NPU IOMMU on mainline kernel 6.18 is the ARM SMMUv3.
+        #
+        # Confirmed: the NPU uses the internal rockchip-iommu (rknn_mmu_0/1/2).
+        # Evidence: dmesg "Adding to iommu group 7" is emitted by the
+        # rockchip-iommu driver.  The mainline rk3588-base.dtsi NPU nodes use
+        # only iommus phandles; there is no iommu-map to arm-smmu-v3.
+        # The arm-smmu-v3 is only used for PCIe devices on RK3588.
+        #
+        # Root cause: SRST_A_RKNN_NODDR (CRU reset) resets the rknn_mmu
+        # hardware registers, wiping the page-table-base register.  Without
+        # a reprogram, every subsequent NPU DMA walks from base=0 (invalid),
+        # triggering a DMA fault and leaving run_task_counter=0 (300 s timeout).
+        #
+        # Fix: restore iommu_detach_device + iommu_attach_device after CRU
+        # assert/deassert.  For rockchip-iommu, detach_device only disables
+        # the hardware IOMMU; attach_device writes the correct page-table base
+        # address from the existing domain and re-enables the hardware.  The
+        # DRAM page-table entries (IOVA→PA mappings) set by iommu_map() calls
+        # are not disturbed — only the hardware page-table-base register is
+        # restored.  This is exactly what the BSP kernel 5.10 code did, and it
+        # works identically on mainline 6.18 because the IOMMU is the same
+        # rockchip-iommu hardware block.
+        python3 -c "import base64,sys; exec(base64.b64decode(b'aW1wb3J0IHN5cwoKZCA9IG9wZW4oJ3NyYy9ya25wdV9yZXNldC5jJykucmVhZCgpCgojIFJldiAyNzogcmVzdG9yZSBpb21tdV9kb21haW4gdmFyaWFibGUgZGVjbGFyYXRpb24gcmVtb3ZlZCBieSBSZXYgMjUKb2xkX2RlY2wgPSAoCiAgICAnXHRzdHJ1Y3QgcmtucHVfc3ViY29yZV9kYXRhICpzdWJjb3JlX2RhdGEgPSBOVUxMO1xuJwogICAgJ1x0aW50IHJldCA9IDAsIGkgPSAwO1xuJwopCm5ld19kZWNsID0gKAogICAgJ1x0c3RydWN0IGlvbW11X2RvbWFpbiAqZG9tYWluID0gTlVMTDtcbicKICAgICdcdHN0cnVjdCBya25wdV9zdWJjb3JlX2RhdGEgKnN1YmNvcmVfZGF0YSA9IE5VTEw7XG4nCiAgICAnXHRpbnQgcmV0ID0gMCwgaSA9IDA7XG4nCikKYXNzZXJ0IG9sZF9kZWNsIGluIGQsICdQQVRDSCBGQUlMRUQ6IHZhcmlhYmxlIGRlY2xzIG5vdCBmb3VuZCBpbiBya25wdV9yZXNldC5jJwpkID0gZC5yZXBsYWNlKG9sZF9kZWNsLCBuZXdfZGVjbCwgMSkKCiMgUmV2IDI3OiByZXBsYWNlIFJldiAyNSBjb21tZW50IHdpdGggcmVzdG9yZWQgZGV0YWNoL2F0dGFjaCArIGNvcnJlY3QgYW5hbHlzaXMKbmwgPSBjaHIoOTIpICsgJ24nCm9sZF9ibG9jayA9ICgKICAgICdcdC8qIEJ1ZyA1NSByZXYgMjU6IHNraXAgaW9tbXVfZGV0YWNoX2RldmljZSArIGlvbW11X2F0dGFjaF9kZXZpY2UuXG4nCiAgICAnXHQgKiBPbiBCU1Aga2VybmVsIDUuMTAgdGhlIElPTU1VIGlzIHRoZSBpbi1OUFUgcm9ja2NoaXAtaW9tbXUgYmxvY2s7XG4nCiAgICAnXHQgKiBkZXRhY2gvcmVhdHRhY2ggYWZ0ZXIgQ1JVIHJlc2V0IHJlcHJvZ3JhbW1lcyBpdCBjb3JyZWN0bHkuXG4nCiAgICAnXHQgKiBPbiBtYWlubGluZSBrZXJuZWwgNi4xOCB0aGUgSU9NTVUgaXMgdGhlIEFSTSBTTU1VdjMsIGEgc2VwYXJhdGVcbicKICAgICdcdCAqIGhhcmR3YXJlIGJsb2NrIE5PVCByZXNldCBieSB0aGUgTlBVIENSVSBsaW5lcy4gIENhbGxpbmdcbicKICAgICdcdCAqIGlvbW11X2RldGFjaF9kZXZpY2UgKyBpb21tdV9hdHRhY2hfZGV2aWNlIHRlYXJzIGRvd24gdGhlIFNNTVV2M1xuJwogICAgJ1x0ICogcGFnZS10YWJsZSBjb250ZXh0OyB0aGlzIGJyZWFrcyBhbGwgTlBVIERNQSBJT1ZBIHRyYW5zbGF0aW9ucyxcbicKICAgICdcdCAqIGxlYXZpbmcgcnVuX3Rhc2tfY291bnRlciBhdCAwIG9uIGV2ZXJ5IGNvcmUgKDMwMCBzIHRpbWVvdXQpLlxuJwogICAgJ1x0ICogVGhlIENSVSBhc3NlcnQvZGVhc3NlcnQgYWJvdmUgaXMgc3VmZmljaWVudCB0byByZXNldCBOUFUgc3RhdGU7XG4nCiAgICAnXHQgKiB0aGUgQVJNIFNNTVV2MyBjb250ZXh0IHJlbWFpbnMgdmFsaWQgYW5kIG11c3Qgbm90IGJlIGRpc3R1cmJlZC4gKi9cbicKKQpuZXdfYmxvY2sgPSAoCiAgICAnXHQvKiBCdWcgNTUgcmV2IDI3OiByZXN0b3JlIGlvbW11X2RldGFjaF9kZXZpY2UgKyBpb21tdV9hdHRhY2hfZGV2aWNlLlxuJwogICAgJ1x0ICogVGhlIE5QVSBJT01NVSBvbiBtYWlubGluZSBrZXJuZWwgNi4xOCBpcyB0aGUgaW50ZXJuYWwgcm9ja2NoaXAtaW9tbXVcbicKICAgICdcdCAqIChya25uX21tdV8wLzEvMiksIE5PVCB0aGUgQVJNIFNNTVV2My4gIENvbmZpcm1lZDogZG1lc2cgc2hvd3NcbicKICAgICdcdCAqICJBZGRpbmcgdG8gaW9tbXUgZ3JvdXAgNyIgZnJvbSB0aGUgcm9ja2NoaXAtaW9tbXUgZHJpdmVyOyB0aGUgTlBVIERUXG4nCiAgICAnXHQgKiBub2RlIGhhcyBvbmx5IGlvbW11cyBwaGFuZGxlcyAobm8gaW9tbXUtbWFwIGZvciBhcm0tc21tdS12MykuXG4nCiAgICAnXHQgKiBTUlNUX0FfUktOTl9OT0REUiByZXNldHMgcmtubl9tbXUgaGFyZHdhcmUsIHdpcGluZyB0aGUgcGFnZS10YWJsZS1cbicKICAgICdcdCAqIGJhc2UgcmVnaXN0ZXIuICBXaXRob3V0IHJlcHJvZ3JhbSBldmVyeSBOUFUgRE1BIHVzZXMgYmFzZT0wIChpbnZhbGlkKVxuJwogICAgJ1x0ICogLT4gRE1BIGZhdWx0IC0+IHJ1bl90YXNrX2NvdW50ZXI9MCAoMzAwIHMgdGltZW91dCkuXG4nCiAgICAnXHQgKiBpb21tdV9kZXRhY2hfZGV2aWNlIGRpc2FibGVzIHJrbm5fbW11IGh3OyBpb21tdV9hdHRhY2hfZGV2aWNlIHdyaXRlc1xuJwogICAgJ1x0ICogdGhlIGNvcnJlY3QgcGFnZS10YWJsZSBiYXNlIGZyb20gdGhlIGV4aXN0aW5nIGRvbWFpbiBhbmQgcmUtZW5hYmxlc1xuJwogICAgJ1x0ICogcmtubl9tbXUuICBEUkFNIHBhZ2UtdGFibGUgZW50cmllcyBmcm9tIGlvbW11X21hcCgpIGFyZSBwcmVzZXJ2ZWQ7XG4nCiAgICAnXHQgKiBvbmx5IHRoZSBoYXJkd2FyZSBwYWdlLXRhYmxlLWJhc2UgcmVnaXN0ZXIgaXMgcmVzdG9yZWQuICovXG4nCiAgICAnXHRpZiAocmtucHVfZGV2LT5pb21tdV9lbilcbicKICAgICdcdFx0ZG9tYWluID0gaW9tbXVfZ2V0X2RvbWFpbl9mb3JfZGV2KHJrbnB1X2Rldi0+ZGV2KTtcbicKICAgICdcbicKICAgICdcdGlmIChkb21haW4pIHtcbicKICAgICdcdFx0aW9tbXVfZGV0YWNoX2RldmljZShkb21haW4sIHJrbnB1X2Rldi0+ZGV2KTtcbicKICAgICdcdFx0aW9tbXVfYXR0YWNoX2RldmljZShkb21haW4sIHJrbnB1X2Rldi0+ZGV2KTtcbicKICAgICdcdFx0ZGV2X2luZm8ocmtucHVfZGV2LT5kZXYsXG4nCiAgICAnXHRcdFx0ICJCdWc1NSByMjc6IGlvbW11IHJlYXR0YWNoIGRvbmUgYWZ0ZXIgQ1JVIHJlc2V0JyArIG5sICsgJyIpO1xuJwogICAgJ1x0fVxuJwopCmFzc2VydCBvbGRfYmxvY2sgaW4gZCwgJ1BBVENIIEZBSUxFRDogUmV2IDI1IGNvbW1lbnQgbm90IGZvdW5kIGluIHJrbnB1X3Jlc2V0LmMnCmQgPSBkLnJlcGxhY2Uob2xkX2Jsb2NrLCBuZXdfYmxvY2ssIDEpCgpvcGVuKCdzcmMvcmtucHVfcmVzZXQuYycsICd3Jykud3JpdGUoZCkKb2sgPSAoCiAgICAnQnVnIDU1IHJldiAyNycgaW4gZAogICAgYW5kICdzdHJ1Y3QgaW9tbXVfZG9tYWluICpkb21haW4nIGluIGQKICAgIGFuZCAnaW9tbXVfZGV0YWNoX2RldmljZShkb21haW4sIHJrbnB1X2Rldi0+ZGV2KScgaW4gZAogICAgYW5kICdpb21tdV9hdHRhY2hfZGV2aWNlKGRvbWFpbiwgcmtucHVfZGV2LT5kZXYpJyBpbiBkCiAgICBhbmQgJ0FSTSBTTU1VdjMgY29udGV4dCByZW1haW5zIHZhbGlkJyBub3QgaW4gZAopCnN5cy5leGl0KDAgaWYgb2sgZWxzZSAxKQo=').decode())"
+        echo "BUG55 rev27 patch: OK"
+        echo "BUG55 rev27 cache-buster: 2026-05-01-restore-iommu-reattach-rockchip"
+
     build:
       - |
         # Diagnostic: confirm Kbuild content visible to the build step.
