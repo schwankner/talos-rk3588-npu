@@ -578,6 +578,36 @@ steps:
         echo "BUG55 rev29 patch: OK"
         echo "BUG55 rev29 cache-buster: 2026-05-01-power-on-iommu-reattach-fix-anchor"
 
+        # Bug 55 rev 30: add smp_mb() before first_task reads in rknpu_job.c.
+        #
+        # Root cause: ARM64 NC (Normal Non-Cacheable / write-combining) store
+        # buffer is NOT drained on syscall entry.  librknnrt writes task struct
+        # fields -- including regcfg_amount -- via a pgprot_writecombine mmap at
+        # EL0, then immediately calls RKNPU_SUBMIT via svc.  The svc instruction
+        # is a Context Synchronization Event but explicitly does NOT drain the
+        # CPU write buffer.  NC stores issued just before svc may remain in
+        # write-combining buffers when the EL1 ioctl handler reads kv_addr.
+        # NC kv_addr reads bypass L1/L2 and fetch from the PoC (L3/DRAM); if
+        # EL0 stores have not yet committed to PoC, the kernel reads stale zeros
+        # from alloc_page(__GFP_ZERO) instead of the real task data.
+        #
+        # Evidence from dmesg:
+        #   BUG55 debug: rc=0xc49300 im=0x0   ← regcmd_addr (written at model-load,
+        #                                         committed to DRAM long before ioctl) is
+        #                                         non-zero; regcfg_amount reads as 0
+        #   BUG55 r15: rga=0 pca=1            ← first_task->regcfg_amount = 0
+        #
+        # Fix: insert smp_mb() (= DMB ISH on ARM64) immediately before the first
+        # dereference of first_task fields.  DMB ISH is a Data Memory Barrier for
+        # the Inner Shareable domain.  It forces all outstanding stores from the
+        # current PE -- including EL0 NC writes -- to be globally observable in
+        # the IS domain before any subsequent load instruction.  The reads of
+        # regcmd_addr, int_mask, and regcfg_amount below then see the actual
+        # task data written by librknnrt.
+        python3 -c "import base64,sys; exec(base64.b64decode(b'aW1wb3J0IHN5cwpkID0gb3Blbignc3JjL3JrbnB1X2pvYi5jJykucmVhZCgpCm5sID0gY2hyKDkyKSArICduJwoKb2xkID0gKAogICAgJ1x0ZGV2X2luZm8ocmtucHVfZGV2LT5kZXYsICcKICAgICciQlVHNTUgZGVidWc6IGNpPSVkIHRzPSVkIHRlPSVkIHJjPTB4JWxseCBpbT0weCV4IHRiYT0weCVsbHgnICsgbmwgKyAnIiwgJwogICAgJ2NvcmVfaW5kZXgsIHRhc2tfc3RhcnQsIHRhc2tfZW5kLCAnCiAgICAnKHU2NClmaXJzdF90YXNrLT5yZWdjbWRfYWRkciwgZmlyc3RfdGFzay0+aW50X21hc2ssICcKICAgICcodTY0KWFyZ3MtPnRhc2tfYmFzZV9hZGRyKTtcbicKKQpuZXcgPSAoCiAgICAnXHQvKlxuJwogICAgJ1x0ICogQnVnIDU1IHJldiAzMDogQVJNNjQgTkMgc3RvcmUgYnVmZmVyIG5vdCBkcmFpbmVkIG9uIHN5c2NhbGwgZW50cnkuXG4nCiAgICAnXHQgKiBsaWJya25ucnQgd3JpdGVzIHRhc2sgc3RydWN0IGZpZWxkcyAoaW5jbHVkaW5nIHJlZ2NmZ19hbW91bnQpIGludG8gdGhlXG4nCiAgICAnXHQgKiBzaGFyZWQgdGFzayBidWZmZXIgdmlhIGEgTm9ybWFsLU5DIChwZ3Byb3Rfd3JpdGVjb21iaW5lKSBtbWFwIGF0IEVMMCxcbicKICAgICdcdCAqIHRoZW4gaW1tZWRpYXRlbHkgY2FsbHMgUktOUFVfU1VCTUlUIHZpYSBzdmMuICBUaGUgc3ZjIGluc3RydWN0aW9uIGlzIGFcbicKICAgICdcdCAqIENvbnRleHQgU3luY2hyb25pemF0aW9uIEV2ZW50IChDU0UpIGJ1dCBleHBsaWNpdGx5IGRvZXMgTk9UIGRyYWluIHRoZVxuJwogICAgJ1x0ICogQ1BVIHdyaXRlL3N0b3JlIGJ1ZmZlci4gIE5DIHN0b3JlcyBpc3N1ZWQgYXQgRUwwIG1heSBzdGlsbCBiZSBoZWxkIGluXG4nCiAgICAnXHQgKiB3cml0ZS1jb21iaW5pbmcgYnVmZmVycyB3aGVuIHRoZSBFTDEgaW9jdGwgaGFuZGxlciBzdGFydHMgZXhlY3V0aW5nLlxuJwogICAgJ1x0ICogTkMgcmVhZHMgZnJvbSBrdl9hZGRyIGJ5cGFzcyBMMS9MMiBhbmQgZmV0Y2ggZnJvbSB0aGUgUG9DIChMMy9EUkFNKTtcbicKICAgICdcdCAqIGlmIHRoZSBFTDAgc3RvcmVzIGhhdmUgbm90IHlldCBjb21taXR0ZWQgdG8gUG9DLCB0aGUga2VybmVsIHJlYWRzIHN0YWxlXG4nCiAgICAnXHQgKiB6ZXJvcyBsZWZ0IGJ5IGFsbG9jX3BhZ2UoX19HRlBfWkVSTykgaW5zdGVhZCBvZiB0aGUgcmVhbCB0YXNrIGRhdGEuXG4nCiAgICAnXHQgKiBFdmlkZW5jZTogcmVnY21kX2FkZHIgKHdyaXR0ZW4gYXQgbW9kZWwtbG9hZCwgY29tbWl0dGVkIHRvIERSQU0gbG9uZyBhZ28pXG4nCiAgICAnXHQgKiByZWFkcyBjb3JyZWN0bHkgYXMgMHhjNDkzMDAsIHdoaWxlIHJlZ2NmZ19hbW91bnQgKHdyaXR0ZW4gaW1tZWRpYXRlbHlcbicKICAgICdcdCAqIGJlZm9yZSBTVUJNSVQgaW9jdGwpIHJlYWRzIGFzIDAgLS0gZXhhY3RseSB0aGUgd3JpdGUtY29tYmluaW5nIGxhdGVuY3lcbicKICAgICdcdCAqIHBhdHRlcm4gKHNlZSBBUk0gQVJNIEIyLjMuNSwgQ29ydGV4LUE1NSBUUk0gMi40LjMpLlxuJwogICAgJ1x0ICogc21wX21iKCkgY29tcGlsZXMgdG8gRE1CIElTSCBvbiBBUk02NDogYSBEYXRhIE1lbW9yeSBCYXJyaWVyIGZvciB0aGVcbicKICAgICdcdCAqIElubmVyIFNoYXJlYWJsZSBkb21haW4uICBJdCBmb3JjZXMgQUxMIG91dHN0YW5kaW5nIHN0b3JlcyBmcm9tIHRoZVxuJwogICAgJ1x0ICogY3VycmVudCBQRSAtLSBpbmNsdWRpbmcgRUwwIE5DIHdyaXRlcyAtLSB0byBiZSBnbG9iYWxseSBvYnNlcnZhYmxlIHRvXG4nCiAgICAnXHQgKiBhbGwgSVMtZG9tYWluIG9ic2VydmVycyBiZWZvcmUgYW55IHN1YnNlcXVlbnQgbG9hZCBpbnN0cnVjdGlvbi4gIFRoZVxuJwogICAgJ1x0ICogcmVhZHMgb2YgZmlyc3RfdGFzayBmaWVsZHMgYmVsb3cgdGhlcmVmb3JlIHNlZSB0aGUgcmVhbCB0YXNrIGRhdGEuXG4nCiAgICAnXHQgKi9cbicKICAgICdcdHNtcF9tYigpO1xuJwogICAgJ1x0ZGV2X2luZm8ocmtucHVfZGV2LT5kZXYsICcKICAgICciQlVHNTUgZGVidWc6IGNpPSVkIHRzPSVkIHRlPSVkIHJjPTB4JWxseCBpbT0weCV4IHRiYT0weCVsbHgnICsgbmwgKyAnIiwgJwogICAgJ2NvcmVfaW5kZXgsIHRhc2tfc3RhcnQsIHRhc2tfZW5kLCAnCiAgICAnKHU2NClmaXJzdF90YXNrLT5yZWdjbWRfYWRkciwgZmlyc3RfdGFzay0+aW50X21hc2ssICcKICAgICcodTY0KWFyZ3MtPnRhc2tfYmFzZV9hZGRyKTtcbicKKQphc3NlcnQgb2xkIGluIGQsICdQQVRDSCBGQUlMRUQ6IEJVRzU1IGRlYnVnIHByaW50IGFuY2hvciBub3QgZm91bmQgaW4gcmtucHVfam9iLmMnCmQgPSBkLnJlcGxhY2Uob2xkLCBuZXcsIDEpCm9wZW4oJ3NyYy9ya25wdV9qb2IuYycsICd3Jykud3JpdGUoZCkKc3lzLmV4aXQoMCBpZiAnc21wX21iKCknIGluIGQgYW5kICdCdWcgNTUgcmV2IDMwJyBpbiBkIGVsc2UgMSkK').decode())"
+        echo "BUG55 rev30 patch: OK"
+        echo "BUG55 rev30 cache-buster: 2026-05-01-smp-mb-store-buffer-drain"
+
     build:
       - |
         # Diagnostic: confirm Kbuild content visible to the build step.

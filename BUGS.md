@@ -2356,6 +2356,74 @@ so local file changes (e.g. `rknpu_mem.c`) were silently ignored.
 **Observed on:** rknpu.ko 0.9.10, librknnrt.so 2.3.2, Talos 1.13.0-rc.0 /
 kernel 6.18.22-talos, Turing RK1 (RK3588). gemma2:2b (2.4 GB) fails through Rev 5.
 
+### Bug 55 follow-on: `run_task_counter=0` — ARM64 write-combining store buffer not drained on syscall entry
+
+**Symptom:** After all IOMMU/DMA fixes (Revs 1–29), every inference attempt fails with:
+```
+E RKNN: failed to submit!, run task counter: 0, int status: 0
+```
+The NPU job times out after 6 seconds per attempt. `INT_RAW_STATUS = 0xc0000000` (bits
+30+31: ILLEGAL_PARAM + DMA fault) on every core, meaning the hardware rejected the task
+parameters and never started executing.
+
+**Kernel debug (dmesg):**
+```
+BUG55 debug: ci=0 ts=0 te=37 rc=0xc49300 im=0x0 tba=0x0
+BUG55 r15:   ci=0 rga=0 pca=1 imm=0xc0000000
+```
+Key observation: `rc = first_task->regcmd_addr = 0xc49300` (non-zero, correct),
+but `rga = first_task->regcfg_amount = 0` (wrong, should be ~100–600).
+
+**Root cause:** ARM64 Normal Non-Cacheable (NC) write-combining store buffer is not
+drained on syscall entry.
+
+librknnrt writes the `rknpu_task` struct fields — including `regcfg_amount` (register
+config count, used to compute `PC_DATA_AMOUNT`) — into the task buffer via a
+`pgprot_writecombine` mmap at EL0, then immediately calls `RKNPU_SUBMIT` via `svc`.
+
+The `svc` instruction is a **Context Synchronization Event (CSE)** per ARM ARM D1.5.1,
+which ensures the instruction stream is synchronized. However, a CSE does **not** drain
+the CPU write buffer. Per ARM ARM B2.3.5 and Cortex-A55 TRM §2.4.3:
+
+> NC stores issued at EL0 may remain in write-combining buffers after exception entry.
+> NC reads from the same physical address at EL1 go directly to the PoC (L3/DRAM),
+> bypassing L1/L2; if the EL0 stores have not yet committed to PoC, the EL1 reads
+> return stale data (zeros from `alloc_page(__GFP_ZERO)`).
+
+**Why `regcmd_addr` is non-zero but `regcfg_amount` is zero:** `regcmd_addr` points to
+the register command buffer and is written at model-load time (tens to hundreds of
+milliseconds before SUBMIT). By the time inference runs, that write has long since
+committed to DRAM. `regcfg_amount` is written into the task struct *immediately* before
+the SUBMIT ioctl call; those stores are still in the write-combining buffer when the
+kernel reads `kv_addr`.
+
+**Why Rev 9 and Rev 10 did not fix it:**
+- Rev 9 (`pgprot_writecombine` for `kv_addr`): NC reads still see stale DRAM content
+  when EL0 NC writes haven't committed.
+- Rev 10 (`flush_dcache_page` after `alloc_page`): Removes stale *zero cache lines*
+  from L1/L2 so subsequent reads go to DRAM — but DRAM still contains zeros if EL0's
+  writes haven't reached DRAM yet.
+
+Neither Rev 9 nor Rev 10 addresses the write-combining buffer draining problem.
+
+**Fix (Rev 30):** Add `smp_mb()` in `rknpu_job_subcore_commit_pc()` (rknpu_job.c)
+immediately before the first dereference of `first_task` fields.
+
+`smp_mb()` compiles to `DMB ISH` on ARM64 — a Data Memory Barrier for the Inner
+Shareable domain. It forces **all** outstanding stores from the current PE (including
+EL0 NC writes to the task buffer) to be globally observable to all IS-domain observers
+before any subsequent load instruction. The reads of `regcmd_addr`, `int_mask`, and
+`regcfg_amount` that follow are then guaranteed to see the real task data.
+
+```c
+/* Bug 55 rev 30 — in rknpu_job_subcore_commit_pc(), just before first_task reads */
+smp_mb();   /* DMB ISH: drain EL0 NC store buffer before kv_addr reads */
+dev_info(..., "BUG55 debug: ... rc=0x%llx ...", first_task->regcmd_addr, ...);
+```
+
+**Observed on:** rknpu.ko 0.9.8, librknnrt.so 2.3.2, Talos 1.13.0-rc.0 /
+kernel 6.18.22-talos, Turing RK1 (RK3588).
+
 ---
 
 *Add new bugs above this line, most recent first.*
