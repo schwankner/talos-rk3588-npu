@@ -541,6 +541,22 @@ steps:
         echo "BUG55 rev27 patch: OK"
         echo "BUG55 rev27 cache-buster: 2026-05-01-restore-iommu-reattach-rockchip"
 
+        # Bug 55 rev 28: restore probe-time soft_reset removed by Rev 26.
+        #
+        # Rev 26 incorrectly assumed cold boot was a "clean state" because
+        # Revs 1-19 worked without probe soft_reset.  The actual mechanism:
+        # rockchip-iommu attach_dev is called at device registration (before
+        # rknpu_power_on() brings up clocks and powers the rknn_mmu hardware).
+        # The PT-base register write goes to unpowered hardware and is LOST.
+        # PT base = 0 at first inference → DMA fault → run_task_counter = 0.
+        # Rev 27 confirmed the IOMMU is rockchip-iommu (rknn_mmu_0/1/2).
+        # With probe soft_reset restored: CRU assert/deassert + r27 iommu
+        # detach/attach runs AFTER clk_bulk_prepare_enable while hardware is
+        # powered; rknn_mmu PT base is correctly programmed; DMA works.
+        python3 -c "import base64,sys; exec(base64.b64decode(b'aW1wb3J0IHN5cwpkID0gb3Blbignc3JjL3JrbnB1X2Rydi5jJykucmVhZCgpCgpubCA9IGNocig5MikgKyAnbicKCm9sZCA9ICgKICAgICdcdGNsa19idWxrX3ByZXBhcmVfZW5hYmxlKHJrbnB1X2Rldi0+bnVtX2Nsa3MsIHJrbnB1X2Rldi0+Y2xrcyk7XG4nCiAgICAnXHRyZXQgPSBya25wdV9yZWdpc3Rlcl9pcnEocmtucHVfZGV2KTtcbicKKQpuZXcgPSAoCiAgICAnXHRjbGtfYnVsa19wcmVwYXJlX2VuYWJsZShya25wdV9kZXYtPm51bV9jbGtzLCBya25wdV9kZXYtPmNsa3MpO1xuJwogICAgJ1x0LyogQnVnIDU1IHJldiAyODogcmVwcm9ncmFtIHJrbm5fbW11IHBhZ2UtdGFibGUtYmFzZSBhdCBwcm9iZS5cbicKICAgICdcdCAqIHJvY2tjaGlwLWlvbW11IGF0dGFjaF9kZXYgaXMgY2FsbGVkIGF0IGRldmljZSByZWdpc3RyYXRpb24sXG4nCiAgICAnXHQgKiBiZWZvcmUgcmtucHVfcG93ZXJfb24oKSBicmluZ3MgdXAgY2xvY2tzIGFuZCB0aGUgcmtubl9tbXUgaGFyZHdhcmUuXG4nCiAgICAnXHQgKiBUaGUgUFQtYmFzZSByZWdpc3RlciB3cml0ZSBnb2VzIHRvIHVucG93ZXJlZCBoYXJkd2FyZSBhbmQgaXMgbG9zdFxuJwogICAgJ1x0ICogKFBUIGJhc2UgPSAwIGF0IGZpcnN0IGluZmVyZW5jZSAtPiBETUEgZmF1bHQgLT4gcnVuX3Rhc2tfY291bnRlciA9IDApLlxuJwogICAgJ1x0ICogQ2FsbGluZyBzb2Z0X3Jlc2V0IGhlcmUgKENSVSBhc3NlcnQvZGVhc3NlcnQgKyByMjcgaW9tbXVfZGV0YWNoL2F0dGFjaClcbicKICAgICdcdCAqIHdoaWxlIGNsb2NrcyBhcmUgc3RhYmxlIHJlcHJvZ3JhbXMgdGhlIHJrbm5fbW11IFBUIGJhc2Ugd2l0aCBoYXJkd2FyZVxuJwogICAgJ1x0ICogcG93ZXJlZCwgZW5hYmxpbmcgRE1BIHRyYW5zbGF0aW9ucyBiZWZvcmUgdGhlIGZpcnN0IGpvYiBpcyBzdWJtaXR0ZWQuICovXG4nCiAgICAnXHRya25wdV9zb2Z0X3Jlc2V0KHJrbnB1X2Rldik7XG4nCiAgICAnXHRkZXZfaW5mbyhkZXYsICJCdWc1NSByMjg6IHByb2JlIHNvZnRfcmVzZXQgZG9uZScgKyBubCArICciKTtcbicKICAgICdcdHJldCA9IHJrbnB1X3JlZ2lzdGVyX2lycShya25wdV9kZXYpO1xuJwopCmFzc2VydCBvbGQgaW4gZCwgJ1BBVENIIEZBSUxFRDogY2xrX2J1bGsvcmVnaXN0ZXJfaXJxIGFuY2hvciBub3QgZm91bmQgaW4gcmtucHVfZHJ2LmMnCmQgPSBkLnJlcGxhY2Uob2xkLCBuZXcsIDEpCm9wZW4oJ3NyYy9ya25wdV9kcnYuYycsICd3Jykud3JpdGUoZCkKb2sgPSAnQnVnNTUgcjI4JyBpbiBkIGFuZCAncmtucHVfc29mdF9yZXNldChya25wdV9kZXYpJyBpbiBkCnN5cy5leGl0KDAgaWYgb2sgZWxzZSAxKQo=').decode())"
+        echo "BUG55 rev28 patch: OK"
+        echo "BUG55 rev28 cache-buster: 2026-05-01-restore-probe-soft-reset"
+
     build:
       - |
         # Diagnostic: confirm Kbuild content visible to the build step.
