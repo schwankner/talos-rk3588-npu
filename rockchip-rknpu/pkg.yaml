@@ -557,27 +557,6 @@ steps:
         echo "BUG55 rev28 patch: OK"
         echo "BUG55 rev28 cache-buster: 2026-05-01-restore-probe-soft-reset-fix-anchor"
 
-        # Bug 55 rev 29: add iommu reattach inside rknpu_power_on().
-        #
-        # Rev 28 placed soft_reset at probe (after clk_bulk_prepare_enable).
-        # This fires once at module load with hardware powered, and correctly
-        # programs the rknn_mmu PT base via Rev 27's iommu_detach/attach.
-        #
-        # However, runtime PM suspends/resumes the NPU between jobs.  Each
-        # rknpu_power_on() call brings up regulators, clocks and PM domains,
-        # but the rknn_mmu PT-base register is reset to 0 by the power cycle
-        # (hardware default).  There is no iommu reattach in the power-on path,
-        # so every job after the first power cycle hits PT base = 0 → DMA fault
-        # → run_task_counter = 0 (300 s timeout).
-        #
-        # Fix: add iommu_detach_device + iommu_attach_device at the END of
-        # rknpu_power_on(), after pm_runtime_get_sync(dev) + state_init bring
-        # the hardware fully online, so the rknn_mmu PT base is reprogrammed
-        # before every job submission following a power cycle.
-        python3 -c "import base64,sys; exec(base64.b64decode(b'aW1wb3J0IHN5cwpkID0gb3Blbignc3JjL3JrbnB1X2Rydi5jJykucmVhZCgpCm5sID0gY2hyKDkyKSArICduJwoKb2xkX2VuZCA9ICgKICAgICdcbm91dDpcbicKICAgICcjaWZuZGVmIEZQR0FfUExBVEZPUk1cbicKICAgICdcdHJrbnB1X2RldmZyZXFfdW5sb2NrKHJrbnB1X2Rldik7XG4nCiAgICAnI2VuZGlmXG4nCiAgICAnXG4nCiAgICAnXHRyZXR1cm4gcmV0O1xuJwogICAgJ31cbicKKQpuZXdfZW5kID0gKAogICAgJ1xuJwogICAgJ1x0LyogQnVnIDU1IHJldiAyOTogcmVwcm9ncmFtIHJrbm5fbW11IHBhZ2UtdGFibGUtYmFzZSBhZnRlciBldmVyeSBwb3dlci1vbi5cbicKICAgICdcdCAqIFJldiAyOCBwbGFjZWQgc29mdF9yZXNldCBhdCBwcm9iZSAoYWZ0ZXIgY2xrX2J1bGtfcHJlcGFyZV9lbmFibGUpLCB3aGljaFxuJwogICAgJ1x0ICogZmlyZXMgb25jZSBhdCBtb2R1bGUgbG9hZCB3aXRoIGhhcmR3YXJlIHBvd2VyZWQuIEhvd2V2ZXIsIHJ1bnRpbWUgUE1cbicKICAgICdcdCAqIHN1c3BlbmRzL3Jlc3VtZXMgdGhlIE5QVSBiZXR3ZWVuIGpvYnM7IGVhY2ggcmtucHVfcG93ZXJfb24oKSBjYWxsIGJyaW5nc1xuJwogICAgJ1x0ICogdXAgY2xvY2tzIGFuZCBQTSBkb21haW5zIGJ1dCB0aGUgcmtubl9tbXUgUFQtYmFzZSByZWdpc3RlciBpcyByZXNldCB0byAwXG4nCiAgICAnXHQgKiBieSB0aGUgcG93ZXIgY3ljbGUuIEFkZGluZyBpb21tdV9kZXRhY2gvYXR0YWNoIGhlcmUsIGFmdGVyIGFsbCBwb3dlciBzZXR1cFxuJwogICAgJ1x0ICogd2hpbGUgaGFyZHdhcmUgaXMgZnVsbHkgcG93ZXJlZCwgcmVwcm9ncmFtcyB0aGUgcmtubl9tbXUgUFQgYmFzZSBiZWZvcmVcbicKICAgICdcdCAqIGV2ZXJ5IGpvYiBhZnRlciBhIHBvd2VyIGN5Y2xlLiAqL1xuJwogICAgJ1x0aWYgKHJrbnB1X2Rldi0+aW9tbXVfZW4pIHtcbicKICAgICdcdFx0c3RydWN0IGlvbW11X2RvbWFpbiAqZG9tYWluID1cbicKICAgICdcdFx0XHRpb21tdV9nZXRfZG9tYWluX2Zvcl9kZXYocmtucHVfZGV2LT5kZXYpO1xuJwogICAgJ1x0XHRpZiAoZG9tYWluKSB7XG4nCiAgICAnXHRcdFx0aW9tbXVfZGV0YWNoX2RldmljZShkb21haW4sIHJrbnB1X2Rldi0+ZGV2KTtcbicKICAgICdcdFx0XHRpb21tdV9hdHRhY2hfZGV2aWNlKGRvbWFpbiwgcmtucHVfZGV2LT5kZXYpO1xuJwogICAgJ1x0XHRcdGRldl9pbmZvKGRldiwgIkJ1ZzU1IHIyOTogcG93ZXJfb24gaW9tbXUgcmVhdHRhY2ggZG9uZScgKyBubCArICciKTtcbicKICAgICdcdFx0fVxuJwogICAgJ1x0fVxuJwogICAgJ1xub3V0OlxuJwogICAgJyNpZm5kZWYgRlBHQV9QTEFURk9STVxuJwogICAgJ1x0cmtucHVfZGV2ZnJlcV91bmxvY2socmtucHVfZGV2KTtcbicKICAgICcjZW5kaWZcbicKICAgICdcbicKICAgICdcdHJldHVybiByZXQ7XG4nCiAgICAnfVxuJwopCmFzc2VydCBvbGRfZW5kIGluIGQsICdQQVRDSCBGQUlMRUQ6IHJrbnB1X3Bvd2VyX29uIG91dDovcmV0dXJuIGFuY2hvciBub3QgZm91bmQgaW4gcmtucHVfZHJ2LmMnCmQgPSBkLnJlcGxhY2Uob2xkX2VuZCwgbmV3X2VuZCwgMSkKb3Blbignc3JjL3JrbnB1X2Rydi5jJywgJ3cnKS53cml0ZShkKQpvayA9ICgKICAgICdCdWc1NSByMjknIGluIGQKICAgIGFuZCAnaW9tbXVfZGV0YWNoX2RldmljZShkb21haW4sIHJrbnB1X2Rldi0+ZGV2KScgaW4gZAogICAgYW5kICdpb21tdV9hdHRhY2hfZGV2aWNlKGRvbWFpbiwgcmtucHVfZGV2LT5kZXYpJyBpbiBkCiAgICBhbmQgJ3N0cnVjdCBpb21tdV9kb21haW4gKmRvbWFpbicgaW4gZAopCnN5cy5leGl0KDAgaWYgb2sgZWxzZSAxKQo=').decode())"
-        echo "BUG55 rev29 patch: OK"
-        echo "BUG55 rev29 cache-buster: 2026-05-01-power-on-iommu-reattach-fix-anchor"
-
         # Bug 55 rev 30: add smp_mb() before first_task reads in rknpu_job.c.
         #
         # Root cause: ARM64 NC (Normal Non-Cacheable / write-combining) store
@@ -608,33 +587,20 @@ steps:
         echo "BUG55 rev30 patch: OK"
         echo "BUG55 rev30 cache-buster: 2026-05-01-smp-mb-store-buffer-drain"
 
-        # Bug 55 rev 31: call rknpu_soft_reset() in rknpu_power_on() to clear
-        # sticky INT_RAW_STATUS fault bits after every runtime PM power cycle.
-        #
-        # Root cause (confirmed from dmesg of every inference attempt):
-        #   BUG55 r16a: ci=0 irs_pre=0xc0000000
-        #
-        # INT_RAW_STATUS bits 30+31 (ILLEGAL_PARAM + DMA fault) are SET on
-        # every rknpu_power_on() call from hardware reset-default state.  With
-        # these sticky bits set, the hardware rejects every job submitted
-        # immediately -- run_task_counter stays 0, 6-second timeout fires.
-        #
-        # Rev 28 added probe-time rknpu_soft_reset() which fires once at module
-        # load.  However runtime PM suspends the NPU between jobs; each PM
-        # resume calls rknpu_power_on() but does NOT call rknpu_soft_reset().
-        # The hardware resets INT_RAW_STATUS to 0xc0000000 on every power cycle.
-        # Rev 28 can only clear the bits for the first inference (before first PM
-        # suspend); all subsequent inferences hit the sticky bits.
-        #
-        # Fix: call rknpu_soft_reset() at the end of rknpu_power_on(), AFTER
-        # rknpu_devfreq_unlock() so the soft_reset can re-acquire the devfreq
-        # lock without deadlock.  The CRU assert/deassert inside soft_reset
-        # clears the sticky fault bits; Rev 27's iommu detach/attach then
-        # reprograms the rknn_mmu PT-base register (superseding Rev 29 which
-        # ran inside the devfreq lock before the CRU reset wiped it).
-        python3 -c "import base64,sys; exec(base64.b64decode(b'aW1wb3J0IHN5cwpkID0gb3Blbignc3JjL3JrbnB1X2Rydi5jJykucmVhZCgpCm5sID0gY2hyKDkyKSArICduJwoKb2xkID0gKAogICAgJ1x0XHRcdGRldl9pbmZvKGRldiwgIkJ1ZzU1IHIyOTogcG93ZXJfb24gaW9tbXUgcmVhdHRhY2ggZG9uZScgKyBubCArICciKTtcbicKICAgICdcdFx0fVxuJwogICAgJ1x0fVxuJwogICAgJ1xub3V0OlxuJwogICAgJyNpZm5kZWYgRlBHQV9QTEFURk9STVxuJwogICAgJ1x0cmtucHVfZGV2ZnJlcV91bmxvY2socmtucHVfZGV2KTtcbicKICAgICcjZW5kaWZcbicKICAgICdcbicKICAgICdcdHJldHVybiByZXQ7XG4nCiAgICAnfVxuJwopCm5ldyA9ICgKICAgICdcdFx0XHRkZXZfaW5mbyhkZXYsICJCdWc1NSByMjk6IHBvd2VyX29uIGlvbW11IHJlYXR0YWNoIGRvbmUnICsgbmwgKyAnIik7XG4nCiAgICAnXHRcdH1cbicKICAgICdcdH1cbicKICAgICdcbm91dDpcbicKICAgICcjaWZuZGVmIEZQR0FfUExBVEZPUk1cbicKICAgICdcdHJrbnB1X2RldmZyZXFfdW5sb2NrKHJrbnB1X2Rldik7XG4nCiAgICAnI2VuZGlmXG4nCiAgICAnXG4nCiAgICAnXHQvKiBCdWcgNTUgcmV2IDMxOiBjYWxsIHJrbnB1X3NvZnRfcmVzZXQoKSBhZnRlciBldmVyeSBwb3dlci1vbiB0byBjbGVhclxuJwogICAgJ1x0ICogdGhlIHN0aWNreSBJTlRfUkFXX1NUQVRVUyBmYXVsdCBiaXRzICgweGMwMDAwMDAwOiBJTExFR0FMX1BBUkFNICsgRE1BXG4nCiAgICAnXHQgKiBmYXVsdCkgdGhhdCB0aGUgaGFyZHdhcmUgcmVzdG9yZXMgdG8gcmVzZXQtZGVmYXVsdCBhZnRlciBlYWNoIHBvd2VyIGN5Y2xlLlxuJwogICAgJ1x0ICogVGhlc2UgYml0cyBjYW5ub3QgYmUgY2xlYXJlZCBieSBJTlRfQ0xFQVIgd3JpdGVzIC0tIG9ubHkgYSBDUlUgc29mdCByZXNldFxuJwogICAgJ1x0ICogY2xlYXJzIHRoZW0uICBSZXYgMjggZmlyZXMgb25jZSBhdCBwcm9iZSBidXQgZG9lcyBub3QgY292ZXIgc3Vic2VxdWVudFxuJwogICAgJ1x0ICogcnVudGltZSBQTSBzdXNwZW5kL3Jlc3VtZSBjeWNsZXM6IGVhY2ggcmtucHVfcG93ZXJfb24oKSBjYWxsIGJyaW5ncyB0aGVcbicKICAgICdcdCAqIGhhcmR3YXJlIGJhY2sgdXAgd2l0aCAweGMwMDAwMDAwIGluIElOVF9SQVdfU1RBVFVTLCBjYXVzaW5nIHRoZSBoYXJkd2FyZVxuJwogICAgJ1x0ICogdG8gcmVqZWN0IGV2ZXJ5IGpvYiBpbW1lZGlhdGVseSAocnVuX3Rhc2tfY291bnRlciBzdGF5cyAwKS4gIENhbGxpbmdcbicKICAgICdcdCAqIHJrbnB1X3NvZnRfcmVzZXQoKSBoZXJlLCBhZnRlciBya25wdV9kZXZmcmVxX3VubG9jaygpIHNvIHRoZSBzb2Z0X3Jlc2V0XG4nCiAgICAnXHQgKiBjYW4gcmUtYWNxdWlyZSB0aGUgZGV2ZnJlcSBsb2NrIHdpdGhvdXQgZGVhZGxvY2ssIGVuc3VyZXMgY2xlYW4gaGFyZHdhcmVcbicKICAgICdcdCAqIHN0YXRlIGJlZm9yZSBldmVyeSBqb2Igc3VibWlzc2lvbiBmb2xsb3dpbmcgYSBwb3dlciBjeWNsZS4gIFRoZSBDUlVcbicKICAgICdcdCAqIGFzc2VydC9kZWFzc2VydCBpbnNpZGUgcmtucHVfc29mdF9yZXNldCgpIGFsc28gcmUtcnVucyBSZXYgMjcgaW9tbXVcbicKICAgICdcdCAqIGRldGFjaC9hdHRhY2ggdG8gcmVwcm9ncmFtIHRoZSBya25uX21tdSBQVC1iYXNlIHJlZ2lzdGVyIGFmdGVyIHRoZSBDUlVcbicKICAgICdcdCAqIHJlc2V0IHdpcGVzIGl0IChzdXBlcnNlZGluZyBSZXYgMjkgd2hpY2ggcmFuIGluc2lkZSB0aGUgZGV2ZnJlcSBsb2NrKS4gKi9cbicKICAgICdcdGlmIChyZXQgPT0gMCkge1xuJwogICAgJ1x0XHRya25wdV9zb2Z0X3Jlc2V0KHJrbnB1X2Rldik7XG4nCiAgICAnXHRcdGRldl9pbmZvKGRldiwgIkJ1ZzU1IHIzMTogcG93ZXJfb24gc29mdF9yZXNldCBkb25lJyArIG5sICsgJyIpO1xuJwogICAgJ1x0fVxuJwogICAgJ1xuJwogICAgJ1x0cmV0dXJuIHJldDtcbicKICAgICd9XG4nCikKYXNzZXJ0IG9sZCBpbiBkLCAnUEFUQ0ggRkFJTEVEOiBSZXYgMjkgcG93ZXJfb24gaW9tbXUgcmVhdHRhY2ggKyBvdXQ6L3JldHVybiBhbmNob3Igbm90IGZvdW5kIGluIHJrbnB1X2Rydi5jJwpkID0gZC5yZXBsYWNlKG9sZCwgbmV3LCAxKQpvcGVuKCdzcmMvcmtucHVfZHJ2LmMnLCAndycpLndyaXRlKGQpCm9rID0gKAogICAgJ0J1ZyA1NSByZXYgMzEnIGluIGQKICAgIGFuZCAncmtucHVfc29mdF9yZXNldChya25wdV9kZXYpJyBpbiBkCiAgICBhbmQgJ0J1ZzU1IHIzMScgaW4gZAopCnN5cy5leGl0KDAgaWYgb2sgZWxzZSAxKQo=').decode())"
-        echo "BUG55 rev31 patch: OK"
-        echo "BUG55 rev31 cache-buster: 2026-05-01-power-on-soft-reset-sticky-bits"
+        # Bug 55 rev 32: revert Rev 29 and Rev 31.
+        # Rev 31 confirmed: rknpu_soft_reset() inside rknpu_power_on() re-fires the
+        # CRU assert/deassert on every runtime PM resume, restoring INT_RAW_STATUS to
+        # 0xc0000000 (hardware reset default, ILLEGAL_PARAM + DMA fault bits 30+31).
+        # This is counterproductive: Rev 24 documented that the ci=2 auto-clear of
+        # bit 30 between INT_CLEAR and OP_EN is the mechanism that allows inference
+        # to proceed despite irs_pre=0xc0000000; adding extra CRU resets per power
+        # cycle disrupts that self-healing behaviour and changes nothing for ci=0/1.
+        # Rev 31 bench result: identical failure to all prior revs (r16a irs=0xc0000000,
+        # rga=0, run_task_counter=0). Bug 31 also confirmed rknpu_power_off() is a
+        # no-op -- hardware is always-on, rknn_mmu PT-base from Rev 28 probe
+        # soft_reset is never reset at runtime. Rev 29 and Rev 31 are both
+        # unnecessary and harmful. Rev 28 probe soft_reset is sufficient.
+        echo "BUG55 rev32 cache-buster: 2026-05-01-revert-power-on-reset"
 
     build:
       - |
