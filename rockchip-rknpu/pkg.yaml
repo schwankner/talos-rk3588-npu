@@ -463,6 +463,31 @@ steps:
         echo "BUG55 rev24 patch: OK"
         echo "BUG55 rev24 cache-buster: 2026-05-01-remove-state-init"
 
+        # Bug 55 rev 25: patch rknpu_reset.c to skip iommu_detach_device +
+        #   iommu_attach_device in rknpu_soft_reset().
+        #
+        # Root cause (confirmed by Rev 24 diagnostic):
+        #   On BSP kernel 5.10 the IOMMU lives inside the NPU block
+        #   (rockchip-iommu); after CRU assert/deassert the in-NPU IOMMU
+        #   loses its programming, so iommu_detach + iommu_attach is
+        #   needed to restore DMA translations.
+        #   On mainline kernel 6.18 (Talos) the IOMMU is the ARM SMMUv3 —
+        #   a separate hardware block that is NOT reset by any NPU CRU
+        #   lines.  Calling iommu_detach_device + iommu_attach_device on
+        #   it destroys the existing page-table context; the reconstructed
+        #   context has races with in-flight TLB shootdowns and ends up
+        #   broken.  After that, all NPU DMA IOVA translations fail and
+        #   run_task_counter stays 0 on every core (300 s timeout).
+        #   Rev 24 confirmed: ALL cores fail identically in this state.
+        #
+        # Fix: remove the iommu_domain variable and the detach/reattach
+        #   block from rknpu_soft_reset().  The CRU assert/deassert is
+        #   sufficient to reset NPU state; the ARM SMMUv3 context remains
+        #   valid across the reset and must not be touched.
+        python3 -c "import base64,sys; exec(base64.b64decode(b'aW1wb3J0IHN5cwpkID0gb3Blbignc3JjL3JrbnB1X3Jlc2V0LmMnKS5yZWFkKCkKCiMgUmVtb3ZlIHRoZSBpb21tdV9kb21haW4gdmFyaWFibGUgZGVjbGFyYXRpb24gKG5vIGxvbmdlciBuZWVkZWQgYWZ0ZXIgcGF0Y2gpCm9sZF9kZWNsID0gKAogICAgJ1x0c3RydWN0IGlvbW11X2RvbWFpbiAqZG9tYWluID0gTlVMTDtcbicKICAgICdcdHN0cnVjdCBya25wdV9zdWJjb3JlX2RhdGEgKnN1YmNvcmVfZGF0YSA9IE5VTEw7XG4nCikKbmV3X2RlY2wgPSAoCiAgICAnXHRzdHJ1Y3QgcmtucHVfc3ViY29yZV9kYXRhICpzdWJjb3JlX2RhdGEgPSBOVUxMO1xuJwopCmFzc2VydCBvbGRfZGVjbCBpbiBkLCAnUEFUQ0ggRkFJTEVEOiBpb21tdV9kb21haW4gZGVjbGFyYXRpb24gbm90IGZvdW5kIGluIHJrbnB1X3Jlc2V0LmMnCmQgPSBkLnJlcGxhY2Uob2xkX2RlY2wsIG5ld19kZWNsLCAxKQoKIyBSZXBsYWNlIHRoZSBpb21tdSBkZXRhY2gvcmVhdHRhY2ggYmxvY2sgd2l0aCBhbiBleHBsYW5hdG9yeSBjb21tZW50Cm9sZF9pb21tdSA9ICgKICAgICdcdGlmIChya25wdV9kZXYtPmlvbW11X2VuKVxuJwogICAgJ1x0XHRkb21haW4gPSBpb21tdV9nZXRfZG9tYWluX2Zvcl9kZXYocmtucHVfZGV2LT5kZXYpO1xuJwogICAgJ1xuJwogICAgJ1x0aWYgKGRvbWFpbikge1xuJwogICAgJ1x0XHRpb21tdV9kZXRhY2hfZGV2aWNlKGRvbWFpbiwgcmtucHVfZGV2LT5kZXYpO1xuJwogICAgJ1x0XHRpb21tdV9hdHRhY2hfZGV2aWNlKGRvbWFpbiwgcmtucHVfZGV2LT5kZXYpO1xuJwogICAgJ1x0fVxuJwopCm5ld19pb21tdSA9ICgKICAgICdcdC8qIEJ1ZyA1NSByZXYgMjU6IHNraXAgaW9tbXVfZGV0YWNoX2RldmljZSArIGlvbW11X2F0dGFjaF9kZXZpY2UuXG4nCiAgICAnXHQgKiBPbiBCU1Aga2VybmVsIDUuMTAgdGhlIElPTU1VIGlzIHRoZSBpbi1OUFUgcm9ja2NoaXAtaW9tbXUgYmxvY2s7XG4nCiAgICAnXHQgKiBkZXRhY2gvcmVhdHRhY2ggYWZ0ZXIgQ1JVIHJlc2V0IHJlcHJvZ3JhbW1lcyBpdCBjb3JyZWN0bHkuXG4nCiAgICAnXHQgKiBPbiBtYWlubGluZSBrZXJuZWwgNi4xOCB0aGUgSU9NTVUgaXMgdGhlIEFSTSBTTU1VdjMsIGEgc2VwYXJhdGVcbicKICAgICdcdCAqIGhhcmR3YXJlIGJsb2NrIE5PVCByZXNldCBieSB0aGUgTlBVIENSVSBsaW5lcy4gIENhbGxpbmdcbicKICAgICdcdCAqIGlvbW11X2RldGFjaF9kZXZpY2UgKyBpb21tdV9hdHRhY2hfZGV2aWNlIHRlYXJzIGRvd24gdGhlIFNNTVV2M1xuJwogICAgJ1x0ICogcGFnZS10YWJsZSBjb250ZXh0OyB0aGlzIGJyZWFrcyBhbGwgTlBVIERNQSBJT1ZBIHRyYW5zbGF0aW9ucyxcbicKICAgICdcdCAqIGxlYXZpbmcgcnVuX3Rhc2tfY291bnRlciBhdCAwIG9uIGV2ZXJ5IGNvcmUgKDMwMCBzIHRpbWVvdXQpLlxuJwogICAgJ1x0ICogVGhlIENSVSBhc3NlcnQvZGVhc3NlcnQgYWJvdmUgaXMgc3VmZmljaWVudCB0byByZXNldCBOUFUgc3RhdGU7XG4nCiAgICAnXHQgKiB0aGUgQVJNIFNNTVV2MyBjb250ZXh0IHJlbWFpbnMgdmFsaWQgYW5kIG11c3Qgbm90IGJlIGRpc3R1cmJlZC4gKi9cbicKKQphc3NlcnQgb2xkX2lvbW11IGluIGQsICdQQVRDSCBGQUlMRUQ6IGlvbW11IGRldGFjaC9yZWF0dGFjaCBibG9jayBub3QgZm91bmQgaW4gcmtucHVfcmVzZXQuYycKZCA9IGQucmVwbGFjZShvbGRfaW9tbXUsIG5ld19pb21tdSwgMSkKCm9wZW4oJ3NyYy9ya25wdV9yZXNldC5jJywgJ3cnKS53cml0ZShkKQojIFZlcmlmeTogaW9tbXVfZG9tYWluIGRlY2xhcmF0aW9uIGdvbmUsIGZ1bmN0aW9uYWwgaW9tbXVfZGV0YWNoX2RldmljZSBjYWxsIGdvbmUsIGNvbW1lbnQgcHJlc2VudApvayA9ICgKICAgICdCdWcgNTUgcmV2IDI1JyBpbiBkCiAgICBhbmQgJ3N0cnVjdCBpb21tdV9kb21haW4gKmRvbWFpbicgbm90IGluIGQKICAgIGFuZCAnaW9tbXVfZGV0YWNoX2RldmljZShkb21haW4sJyBub3QgaW4gZAogICAgYW5kICdpb21tdV9hdHRhY2hfZGV2aWNlKGRvbWFpbiwnIG5vdCBpbiBkCikKc3lzLmV4aXQoMCBpZiBvayBlbHNlIDEpCg==').decode())"
+        echo "BUG55 rev25 patch: OK"
+        echo "BUG55 rev25 cache-buster: 2026-05-01-skip-iommu-detach-reattach"
+
     build:
       - |
         # Diagnostic: confirm Kbuild content visible to the build step.
