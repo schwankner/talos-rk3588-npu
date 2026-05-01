@@ -557,6 +557,27 @@ steps:
         echo "BUG55 rev28 patch: OK"
         echo "BUG55 rev28 cache-buster: 2026-05-01-restore-probe-soft-reset-fix-anchor"
 
+        # Bug 55 rev 29: add iommu reattach inside rknpu_power_on().
+        #
+        # Rev 28 placed soft_reset at probe (after clk_bulk_prepare_enable).
+        # This fires once at module load with hardware powered, and correctly
+        # programs the rknn_mmu PT base via Rev 27's iommu_detach/attach.
+        #
+        # However, runtime PM suspends/resumes the NPU between jobs.  Each
+        # rknpu_power_on() call brings up regulators, clocks and PM domains,
+        # but the rknn_mmu PT-base register is reset to 0 by the power cycle
+        # (hardware default).  There is no iommu reattach in the power-on path,
+        # so every job after the first power cycle hits PT base = 0 → DMA fault
+        # → run_task_counter = 0 (300 s timeout).
+        #
+        # Fix: add iommu_detach_device + iommu_attach_device at the END of
+        # rknpu_power_on(), after pm_runtime_get_sync(dev) + state_init bring
+        # the hardware fully online, so the rknn_mmu PT base is reprogrammed
+        # before every job submission following a power cycle.
+        python3 -c "import base64,sys; exec(base64.b64decode(b'aW1wb3J0IHN5cwpkID0gb3Blbignc3JjL3JrbnB1X2Rydi5jJykucmVhZCgpCgpubCA9IGNocig5MikgKyAnbicKCiMgUmV2IDI5IHBhdGNoIEE6IGFkZCBpb21tdV9kb21haW4qIHRvIHJrbnB1X3Bvd2VyX29uIHZhcmlhYmxlIGRlY2xhcmF0aW9ucy4Kb2xkX2RlY2wgPSAoCiAgICAnXHRzdHJ1Y3QgZGV2aWNlICpkZXYgPSBya25wdV9kZXYtPmRldjtcbicKICAgICdcdGludCByZXQgPSAtRUlOVkFMO1xuJwogICAgJ1x0Ym9vbCB2ZGRfZW5hYmxlZCA9IGZhbHNlLCBtZW1fZW5hYmxlZCA9IGZhbHNlLCBjbGtfZW5hYmxlZCA9IGZhbHNlO1xuJwogICAgJ1x0Ym9vbCBkZXZmcmVxX2xvY2tlZCA9IGZhbHNlO1xuJwogICAgJ1x0Ym9vbCBnb3RfbnB1MCA9IGZhbHNlLCBnb3RfbnB1MSA9IGZhbHNlLCBnb3RfbnB1MiA9IGZhbHNlO1xuJwopCm5ld19kZWNsID0gKAogICAgJ1x0c3RydWN0IGlvbW11X2RvbWFpbiAqZG9tYWluID0gTlVMTDtcbicKICAgICdcdHN0cnVjdCBkZXZpY2UgKmRldiA9IHJrbnB1X2Rldi0+ZGV2O1xuJwogICAgJ1x0aW50IHJldCA9IC1FSU5WQUw7XG4nCiAgICAnXHRib29sIHZkZF9lbmFibGVkID0gZmFsc2UsIG1lbV9lbmFibGVkID0gZmFsc2UsIGNsa19lbmFibGVkID0gZmFsc2U7XG4nCiAgICAnXHRib29sIGRldmZyZXFfbG9ja2VkID0gZmFsc2U7XG4nCiAgICAnXHRib29sIGdvdF9ucHUwID0gZmFsc2UsIGdvdF9ucHUxID0gZmFsc2UsIGdvdF9ucHUyID0gZmFsc2U7XG4nCikKYXNzZXJ0IG9sZF9kZWNsIGluIGQsICdQQVRDSCBGQUlMRUQ6IHJrbnB1X3Bvd2VyX29uIHZhcmlhYmxlIGRlY2xzIG5vdCBmb3VuZCBpbiBya25wdV9kcnYuYycKZCA9IGQucmVwbGFjZShvbGRfZGVjbCwgbmV3X2RlY2wsIDEpCgojIFJldiAyOSBwYXRjaCBCOiBhZGQgaW9tbXUgcmVhdHRhY2ggYXQgZW5kIG9mIHJrbnB1X3Bvd2VyX29uLCBhZnRlciBkZXZmcmVxX3VubG9jawojIGFuZCBiZWZvcmUgcmV0dXJuIDAsIHNvIHJrbm5fbW11IFBUIGJhc2UgaXMgcmVwcm9ncmFtbWVkIGFmdGVyIGV2ZXJ5IHBvd2VyIGN5Y2xlLgpvbGRfZW5kID0gKAogICAgJyNpZm5kZWYgRlBHQV9QTEFURk9STVxuJwogICAgJ1x0cmtucHVfZGV2ZnJlcV91bmxvY2socmtucHVfZGV2KTtcbicKICAgICcjZW5kaWZcbicKICAgICdcbicKICAgICdcdHJldHVybiAwO1xuJwogICAgJ1xuJwogICAgJ2VycjpcbicKKQpuZXdfZW5kID0gKAogICAgJyNpZm5kZWYgRlBHQV9QTEFURk9STVxuJwogICAgJ1x0cmtucHVfZGV2ZnJlcV91bmxvY2socmtucHVfZGV2KTtcbicKICAgICcjZW5kaWZcbicKICAgICdcbicKICAgICdcdC8qIEJ1ZyA1NSByZXYgMjk6IHJlcHJvZ3JhbSBya25uX21tdSBwYWdlLXRhYmxlLWJhc2UgYWZ0ZXIgZXZlcnkgcG93ZXItb24uXG4nCiAgICAnXHQgKiBSZXYgMjggcGxhY2VkIHNvZnRfcmVzZXQgYXQgcHJvYmUgKGFmdGVyIGNsa19idWxrX3ByZXBhcmVfZW5hYmxlKSwgd2hpY2hcbicKICAgICdcdCAqIGZpcmVzIG9uY2UgYXQgbW9kdWxlIGxvYWQgd2l0aCBoYXJkd2FyZSBwb3dlcmVkLiBIb3dldmVyLCBydW50aW1lIFBNXG4nCiAgICAnXHQgKiBzdXNwZW5kcy9yZXN1bWVzIHRoZSBOUFUgYmV0d2VlbiBqb2JzOyBlYWNoIHJrbnB1X3Bvd2VyX29uKCkgY2FsbCBicmluZ3NcbicKICAgICdcdCAqIHVwIGNsb2NrcyBhbmQgUE0gZG9tYWlucyBidXQgdGhlIHJrbm5fbW11IFBULWJhc2UgcmVnaXN0ZXIgaXMgcmVzZXQgdG8gMFxuJwogICAgJ1x0ICogYnkgdGhlIHBvd2VyIGN5Y2xlLiBBZGRpbmcgaW9tbXVfZGV0YWNoL2F0dGFjaCBoZXJlLCBhZnRlclxuJwogICAgJ1x0ICogcG1fcnVudGltZV9nZXRfc3luYyBhbmQgc3RhdGVfaW5pdCB3aGlsZSBoYXJkd2FyZSBpcyBmdWxseSBwb3dlcmVkLFxuJwogICAgJ1x0ICogcmVwcm9ncmFtcyB0aGUgcmtubl9tbXUgUFQgYmFzZSBiZWZvcmUgZXZlcnkgam9iIGFmdGVyIGEgcG93ZXIgY3ljbGUuXG4nCiAgICAnXHQgKiBUaGlzIGlzIGlkZW50aWNhbCB0byB3aGF0IFJldiAyNyBkb2VzIGFmdGVyIENSVSByZXNldCBpbiBzb2Z0X3Jlc2V0O1xuJwogICAgJ1x0ICogaGVyZSBpdCBydW5zIHVuY29uZGl0aW9uYWxseSBvbiBldmVyeSBwb3dlci1vbiBmb3IgdGhlIHNhbWUgcmVhc29uLiAqL1xuJwogICAgJ1x0aWYgKHJrbnB1X2Rldi0+aW9tbXVfZW4pIHtcbicKICAgICdcdFx0ZG9tYWluID0gaW9tbXVfZ2V0X2RvbWFpbl9mb3JfZGV2KHJrbnB1X2Rldi0+ZGV2KTtcbicKICAgICdcdFx0aWYgKGRvbWFpbikge1xuJwogICAgJ1x0XHRcdGlvbW11X2RldGFjaF9kZXZpY2UoZG9tYWluLCBya25wdV9kZXYtPmRldik7XG4nCiAgICAnXHRcdFx0aW9tbXVfYXR0YWNoX2RldmljZShkb21haW4sIHJrbnB1X2Rldi0+ZGV2KTtcbicKICAgICdcdFx0XHRkZXZfaW5mbyhkZXYsICJCdWc1NSByMjk6IHBvd2VyX29uIGlvbW11IHJlYXR0YWNoIGRvbmUnICsgbmwgKyAnIik7XG4nCiAgICAnXHRcdH1cbicKICAgICdcdH1cbicKICAgICdcdHJldHVybiAwO1xuJwogICAgJ1xuJwogICAgJ2VycjpcbicKKQphc3NlcnQgb2xkX2VuZCBpbiBkLCAnUEFUQ0ggRkFJTEVEOiBya25wdV9wb3dlcl9vbiBkZXZmcmVxX3VubG9jay9yZXR1cm4gYW5jaG9yIG5vdCBmb3VuZCBpbiBya25wdV9kcnYuYycKZCA9IGQucmVwbGFjZShvbGRfZW5kLCBuZXdfZW5kLCAxKQoKb3Blbignc3JjL3JrbnB1X2Rydi5jJywgJ3cnKS53cml0ZShkKQpvayA9ICgnQnVnNTUgcjI5JyBpbiBkCiAgICAgIGFuZCAnaW9tbXVfZGV0YWNoX2RldmljZShkb21haW4sIHJrbnB1X2Rldi0+ZGV2KScgaW4gZAogICAgICBhbmQgJ3N0cnVjdCBpb21tdV9kb21haW4gKmRvbWFpbiA9IE5VTEwnIGluIGQpCnN5cy5leGl0KDAgaWYgb2sgZWxzZSAxKQo=').decode())"
+        echo "BUG55 rev29 patch: OK"
+        echo "BUG55 rev29 cache-buster: 2026-05-01-iommu-reattach-in-power-on"
+
     build:
       - |
         # Diagnostic: confirm Kbuild content visible to the build step.
