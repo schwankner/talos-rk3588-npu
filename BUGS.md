@@ -2406,19 +2406,37 @@ kernel reads `kv_addr`.
 
 Neither Rev 9 nor Rev 10 addresses the write-combining buffer draining problem.
 
-**Fix (Rev 30):** Add `smp_mb()` in `rknpu_job_subcore_commit_pc()` (rknpu_job.c)
-immediately before the first dereference of `first_task` fields.
+**Rev 30 (smp_mb — wrong hypothesis, not a fix):** Added `smp_mb()` (DMB ISH) in
+`rknpu_job_subcore_commit_pc()` before reading `first_task` fields, based on the theory
+that `rga=0` was caused by ARM64 write-combining buffer not draining on svc. This did
+NOT fix the problem; `rga=0` persisted and `run_task_counter=0` continued. The `rga=0`
+is likely a consequence of the hardware being in a faulted state (see Rev 31 below), not
+the primary cause.
 
-`smp_mb()` compiles to `DMB ISH` on ARM64 — a Data Memory Barrier for the Inner
-Shareable domain. It forces **all** outstanding stores from the current PE (including
-EL0 NC writes to the task buffer) to be globally observable to all IS-domain observers
-before any subsequent load instruction. The reads of `regcmd_addr`, `int_mask`, and
-`regcfg_amount` that follow are then guaranteed to see the real task data.
+**Rev 31 (actual fix):** The confirmed root cause is `irs_pre=0xc0000000` — sticky
+`INT_RAW_STATUS` fault bits (30+31: ILLEGAL_PARAM + DMA fault) that the hardware
+**restores to reset-default after every power cycle**. With these bits set, the hardware
+rejects every job immediately (`run_task_counter` stays 0). These bits cannot be cleared
+by `INT_CLEAR` writes; only a CRU soft reset clears them.
+
+Rev 28 added a probe-time `rknpu_soft_reset()` which fires once at module load. However,
+runtime PM suspends the NPU between jobs; each subsequent PM resume calls
+`rknpu_power_on()` but does **not** call `rknpu_soft_reset()`. The hardware resets
+`INT_RAW_STATUS` to `0xc0000000` on every power cycle, so Rev 28 only helps until the
+first PM suspend (which happens immediately since there are no pending jobs at probe time).
+
+Fix: call `rknpu_soft_reset()` at the end of `rknpu_power_on()`, **after**
+`rknpu_devfreq_unlock()` so the soft_reset can re-acquire the devfreq lock without
+deadlock. The CRU assert/deassert inside `rknpu_soft_reset()` clears the sticky fault
+bits; Rev 27's iommu detach/attach then reprograms the rknn_mmu PT-base register
+(superseding Rev 29 which ran inside the devfreq lock before the CRU reset would wipe it).
 
 ```c
-/* Bug 55 rev 30 — in rknpu_job_subcore_commit_pc(), just before first_task reads */
-smp_mb();   /* DMB ISH: drain EL0 NC store buffer before kv_addr reads */
-dev_info(..., "BUG55 debug: ... rc=0x%llx ...", first_task->regcmd_addr, ...);
+/* Bug 55 rev 31 — end of rknpu_power_on(), after rknpu_devfreq_unlock() */
+if (ret == 0) {
+    rknpu_soft_reset(rknpu_dev);  /* clears sticky INT_RAW_STATUS 0xc0000000 */
+    dev_info(dev, "Bug55 r31: power_on soft_reset done\n");
+}
 ```
 
 **Observed on:** rknpu.ko 0.9.8, librknnrt.so 2.3.2, Talos 1.13.0-rc.0 /

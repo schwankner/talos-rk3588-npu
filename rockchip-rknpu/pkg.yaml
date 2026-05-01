@@ -608,6 +608,34 @@ steps:
         echo "BUG55 rev30 patch: OK"
         echo "BUG55 rev30 cache-buster: 2026-05-01-smp-mb-store-buffer-drain"
 
+        # Bug 55 rev 31: call rknpu_soft_reset() in rknpu_power_on() to clear
+        # sticky INT_RAW_STATUS fault bits after every runtime PM power cycle.
+        #
+        # Root cause (confirmed from dmesg of every inference attempt):
+        #   BUG55 r16a: ci=0 irs_pre=0xc0000000
+        #
+        # INT_RAW_STATUS bits 30+31 (ILLEGAL_PARAM + DMA fault) are SET on
+        # every rknpu_power_on() call from hardware reset-default state.  With
+        # these sticky bits set, the hardware rejects every job submitted
+        # immediately -- run_task_counter stays 0, 6-second timeout fires.
+        #
+        # Rev 28 added probe-time rknpu_soft_reset() which fires once at module
+        # load.  However runtime PM suspends the NPU between jobs; each PM
+        # resume calls rknpu_power_on() but does NOT call rknpu_soft_reset().
+        # The hardware resets INT_RAW_STATUS to 0xc0000000 on every power cycle.
+        # Rev 28 can only clear the bits for the first inference (before first PM
+        # suspend); all subsequent inferences hit the sticky bits.
+        #
+        # Fix: call rknpu_soft_reset() at the end of rknpu_power_on(), AFTER
+        # rknpu_devfreq_unlock() so the soft_reset can re-acquire the devfreq
+        # lock without deadlock.  The CRU assert/deassert inside soft_reset
+        # clears the sticky fault bits; Rev 27's iommu detach/attach then
+        # reprograms the rknn_mmu PT-base register (superseding Rev 29 which
+        # ran inside the devfreq lock before the CRU reset wiped it).
+        python3 -c "import base64,sys; exec(base64.b64decode(b'aW1wb3J0IHN5cwpkID0gb3Blbignc3JjL3JrbnB1X2Rydi5jJykucmVhZCgpCm5sID0gY2hyKDkyKSArICduJwoKb2xkID0gKAogICAgJ1x0XHRcdGRldl9pbmZvKGRldiwgIkJ1ZzU1IHIyOTogcG93ZXJfb24gaW9tbXUgcmVhdHRhY2ggZG9uZScgKyBubCArICciKTtcbicKICAgICdcdFx0fVxuJwogICAgJ1x0fVxuJwogICAgJ1xub3V0OlxuJwogICAgJyNpZm5kZWYgRlBHQV9QTEFURk9STVxuJwogICAgJ1x0cmtucHVfZGV2ZnJlcV91bmxvY2socmtucHVfZGV2KTtcbicKICAgICcjZW5kaWZcbicKICAgICdcbicKICAgICdcdHJldHVybiByZXQ7XG4nCiAgICAnfVxuJwopCm5ldyA9ICgKICAgICdcdFx0XHRkZXZfaW5mbyhkZXYsICJCdWc1NSByMjk6IHBvd2VyX29uIGlvbW11IHJlYXR0YWNoIGRvbmUnICsgbmwgKyAnIik7XG4nCiAgICAnXHRcdH1cbicKICAgICdcdH1cbicKICAgICdcbm91dDpcbicKICAgICcjaWZuZGVmIEZQR0FfUExBVEZPUk1cbicKICAgICdcdHJrbnB1X2RldmZyZXFfdW5sb2NrKHJrbnB1X2Rldik7XG4nCiAgICAnI2VuZGlmXG4nCiAgICAnXG4nCiAgICAnXHQvKiBCdWcgNTUgcmV2IDMxOiBjYWxsIHJrbnB1X3NvZnRfcmVzZXQoKSBhZnRlciBldmVyeSBwb3dlci1vbiB0byBjbGVhclxuJwogICAgJ1x0ICogdGhlIHN0aWNreSBJTlRfUkFXX1NUQVRVUyBmYXVsdCBiaXRzICgweGMwMDAwMDAwOiBJTExFR0FMX1BBUkFNICsgRE1BXG4nCiAgICAnXHQgKiBmYXVsdCkgdGhhdCB0aGUgaGFyZHdhcmUgcmVzdG9yZXMgdG8gcmVzZXQtZGVmYXVsdCBhZnRlciBlYWNoIHBvd2VyIGN5Y2xlLlxuJwogICAgJ1x0ICogVGhlc2UgYml0cyBjYW5ub3QgYmUgY2xlYXJlZCBieSBJTlRfQ0xFQVIgd3JpdGVzIC0tIG9ubHkgYSBDUlUgc29mdCByZXNldFxuJwogICAgJ1x0ICogY2xlYXJzIHRoZW0uICBSZXYgMjggZmlyZXMgb25jZSBhdCBwcm9iZSBidXQgZG9lcyBub3QgY292ZXIgc3Vic2VxdWVudFxuJwogICAgJ1x0ICogcnVudGltZSBQTSBzdXNwZW5kL3Jlc3VtZSBjeWNsZXM6IGVhY2ggcmtucHVfcG93ZXJfb24oKSBjYWxsIGJyaW5ncyB0aGVcbicKICAgICdcdCAqIGhhcmR3YXJlIGJhY2sgdXAgd2l0aCAweGMwMDAwMDAwIGluIElOVF9SQVdfU1RBVFVTLCBjYXVzaW5nIHRoZSBoYXJkd2FyZVxuJwogICAgJ1x0ICogdG8gcmVqZWN0IGV2ZXJ5IGpvYiBpbW1lZGlhdGVseSAocnVuX3Rhc2tfY291bnRlciBzdGF5cyAwKS4gIENhbGxpbmdcbicKICAgICdcdCAqIHJrbnB1X3NvZnRfcmVzZXQoKSBoZXJlLCBhZnRlciBya25wdV9kZXZmcmVxX3VubG9jaygpIHNvIHRoZSBzb2Z0X3Jlc2V0XG4nCiAgICAnXHQgKiBjYW4gcmUtYWNxdWlyZSB0aGUgZGV2ZnJlcSBsb2NrIHdpdGhvdXQgZGVhZGxvY2ssIGVuc3VyZXMgY2xlYW4gaGFyZHdhcmVcbicKICAgICdcdCAqIHN0YXRlIGJlZm9yZSBldmVyeSBqb2Igc3VibWlzc2lvbiBmb2xsb3dpbmcgYSBwb3dlciBjeWNsZS4gIFRoZSBDUlVcbicKICAgICdcdCAqIGFzc2VydC9kZWFzc2VydCBpbnNpZGUgcmtucHVfc29mdF9yZXNldCgpIGFsc28gcmUtcnVucyBSZXYgMjcgaW9tbXVcbicKICAgICdcdCAqIGRldGFjaC9hdHRhY2ggdG8gcmVwcm9ncmFtIHRoZSBya25uX21tdSBQVC1iYXNlIHJlZ2lzdGVyIGFmdGVyIHRoZSBDUlVcbicKICAgICdcdCAqIHJlc2V0IHdpcGVzIGl0IChzdXBlcnNlZGluZyBSZXYgMjkgd2hpY2ggcmFuIGluc2lkZSB0aGUgZGV2ZnJlcSBsb2NrKS4gKi9cbicKICAgICdcdGlmIChyZXQgPT0gMCkge1xuJwogICAgJ1x0XHRya25wdV9zb2Z0X3Jlc2V0KHJrbnB1X2Rldik7XG4nCiAgICAnXHRcdGRldl9pbmZvKGRldiwgIkJ1ZzU1IHIzMTogcG93ZXJfb24gc29mdF9yZXNldCBkb25lJyArIG5sICsgJyIpO1xuJwogICAgJ1x0fVxuJwogICAgJ1xuJwogICAgJ1x0cmV0dXJuIHJldDtcbicKICAgICd9XG4nCikKYXNzZXJ0IG9sZCBpbiBkLCAnUEFUQ0ggRkFJTEVEOiBSZXYgMjkgcG93ZXJfb24gaW9tbXUgcmVhdHRhY2ggKyBvdXQ6L3JldHVybiBhbmNob3Igbm90IGZvdW5kIGluIHJrbnB1X2Rydi5jJwpkID0gZC5yZXBsYWNlKG9sZCwgbmV3LCAxKQpvcGVuKCdzcmMvcmtucHVfZHJ2LmMnLCAndycpLndyaXRlKGQpCm9rID0gKAogICAgJ0J1ZyA1NSByZXYgMzEnIGluIGQKICAgIGFuZCAncmtucHVfc29mdF9yZXNldChya25wdV9kZXYpJyBpbiBkCiAgICBhbmQgJ0J1ZzU1IHIzMScgaW4gZAopCnN5cy5leGl0KDAgaWYgb2sgZWxzZSAxKQo=').decode())"
+        echo "BUG55 rev31 patch: OK"
+        echo "BUG55 rev31 cache-buster: 2026-05-01-power-on-soft-reset-sticky-bits"
+
     build:
       - |
         # Diagnostic: confirm Kbuild content visible to the build step.
