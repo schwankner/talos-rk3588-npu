@@ -612,6 +612,33 @@ steps:
         # unnecessary and harmful. Rev 28 probe soft_reset is sufficient.
         echo "BUG55 rev32 cache-buster: 2026-05-01-revert-power-on-reset"
 
+        # Bug 55 rev 35: move smp_mb() to correct location — before first_task reads.
+        #
+        # Rev 30 placed smp_mb() (DMB ISH) AFTER the REG_WRITE calls that already read
+        # first_task->regcfg_amount, first_task->int_mask, and first_task->regcmd_addr.
+        # Those reads happened at:
+        #   REG_WRITE(first_task->regcmd_addr, RKNPU_OFFSET_PC_DATA_ADDR)       // pc_data_addr
+        #   REG_WRITE(first_task->regcfg_amount + ..., RKNPU_OFFSET_PC_DATA_AMOUNT)
+        #   REG_WRITE(last_task->int_mask, RKNPU_OFFSET_INT_MASK)
+        #   REG_WRITE(first_task->int_mask, RKNPU_OFFSET_INT_CLEAR)
+        # Rev 30 put the barrier AFTER these, before the dev_info diagnostic — too late.
+        #
+        # Evidence (dmesg Rev 34):
+        #   BUG55 debug: rc=0xc49300 im=0x0 ← regcmd_addr correct (written at model-load,
+        #                                      long before ioctl); int_mask=0 because the
+        #                                      svc entry didn't drain the EL0 NC write buffer
+        #   BUG55 r15: rga=0 pca=1          ← regcfg_amount=0: stale zero from alloc_page
+        #   run_task_counter=0, int_status=0 ← NPU starts with regcfg_amount=0 and does
+        #                                      nothing (PC_DATA_AMOUNT=3 instead of ~38)
+        #
+        # Fix: move smp_mb() (= DMB ISH) to before task_base = task_obj->kv_addr
+        # dereferences, specifically before first_task = &task_base[task_start].
+        # This ensures all EL0 NC stores from librknnrt are globally observable to the
+        # EL1 kernel before the first first_task field is loaded.
+        python3 -c "import base64,sys; exec(base64.b64decode(b'aW1wb3J0IHN5cwpkID0gb3Blbignc3JjL3JrbnB1X2pvYi5jJykucmVhZCgpCgojIFN0ZXAgMTogUmVtb3ZlIHNtcF9tYigpIGZyb20gd3JvbmcgbG9jYXRpb24gKGFmdGVyIFJFR19XUklURXMsIGJlZm9yZSBkZWJ1ZyBwcmludCkuCiMgUmV2IDMwIGluc2VydGVkIGl0IGp1c3QgYmVmb3JlIGRldl9pbmZvKCJCVUc1NSBkZWJ1ZzoiKSwgYnV0IGF0IHRoYXQgcG9pbnQgdGhlCiMgUkVHX1dSSVRFcyB0aGF0IHJlYWQgZmlyc3RfdGFzay0+cmVnY2ZnX2Ftb3VudCBhbmQgaW50X21hc2sgYWxyZWFkeSBoYXBwZW5lZC4Kb2xkMSA9ICdcdHNtcF9tYigpO1xuXHRkZXZfaW5mbyhya25wdV9kZXYtPmRldiwgIkJVRzU1IGRlYnVnOicKbmV3MSA9ICdcdGRldl9pbmZvKHJrbnB1X2Rldi0+ZGV2LCAiQlVHNTUgZGVidWc6Jwphc3NlcnQgb2xkMSBpbiBkLCAnUEFUQ0ggRkFJTEVEOiBzbXBfbWIoKSBiZWZvcmUgQlVHNTUgZGVidWcgcHJpbnQgbm90IGZvdW5kIGluIHJrbnB1X2pvYi5jJwpkID0gZC5yZXBsYWNlKG9sZDEsIG5ldzEsIDEpCgojIFN0ZXAgMjogQWRkIHNtcF9tYigpIEJFRk9SRSBmaXJzdF90YXNrID0gJnRhc2tfYmFzZVt0YXNrX3N0YXJ0XS4KIyBUaGlzIGlzIHRoZSBjb3JyZWN0IGxvY2F0aW9uOiBiZWZvcmUgQU5ZIHJlYWQgZnJvbSB0aGUgTkMtbWFwcGVkIHRhc2sgYnVmZmVyLgojIFJldiAzMCBwbGFjZWQgaXQgYWZ0ZXIgYWxsIFJFR19XUklURXMgLS0gdG9vIGxhdGUuICBUaGUgc3ZjIChzeXNjYWxsIGVudHJ5KSBkb2VzCiMgTk9UIGRyYWluIEFSTTY0IHdyaXRlLWNvbWJpbmluZyBidWZmZXJzOyBETUIgSVNIIGhlcmUgZmx1c2hlcyB0aGUgRUwwIE5DIHN0b3JlcwojIHRoYXQgbGlicmtubnJ0IHdyb3RlIGp1c3QgYmVmb3JlIHRoZSBSS05QVV9TVUJNSVQgaW9jdGwuCm9sZDIgPSAnXHR0YXNrX2Jhc2UgPSB0YXNrX29iai0+a3ZfYWRkcjtcblxuXHRmaXJzdF90YXNrID0gJnRhc2tfYmFzZVt0YXNrX3N0YXJ0XTtcbicKbmV3MiA9ICgKICAgICdcdHRhc2tfYmFzZSA9IHRhc2tfb2JqLT5rdl9hZGRyO1xuJwogICAgJ1x0LyogQnVnIDU1IHJldiAzNTogRE1CIElTSCBiZWZvcmUgYW55IHJlYWQgZnJvbSB0aGUgTkMgdGFzayBidWZmZXIuXG4nCiAgICAnXHQgKiBSZXYgMzAgcGxhY2VkIHNtcF9tYigpIGFmdGVyIHRoZSBSRUdfV1JJVEUgY2FsbHMgdGhhdCBhbHJlYWR5IHJlYWRcbicKICAgICdcdCAqIGZpcnN0X3Rhc2stPnJlZ2NmZ19hbW91bnQgYW5kIGludF9tYXNrIC0tIHRvbyBsYXRlLiAgSW5zZXJ0aW5nIGl0XG4nCiAgICAnXHQgKiBoZXJlIChiZWZvcmUgdGhlIGZpcnN0IGZpcnN0X3Rhc2sgZGVyZWZlcmVuY2UpIGVuc3VyZXMgYWxsIEVMMCBOQ1xuJwogICAgJ1x0ICogc3RvcmVzIGZyb20gbGlicmtubnJ0IGFyZSBnbG9iYWxseSBvYnNlcnZhYmxlIGJlZm9yZSB0aGUga2VybmVsIHJlYWRzLiAqL1xuJwogICAgJ1x0c21wX21iKCk7XG4nCiAgICAnXG4nCiAgICAnXHRmaXJzdF90YXNrID0gJnRhc2tfYmFzZVt0YXNrX3N0YXJ0XTtcbicKKQphc3NlcnQgb2xkMiBpbiBkLCAnUEFUQ0ggRkFJTEVEOiB0YXNrX2Jhc2UvZmlyc3RfdGFzayBhbmNob3Igbm90IGZvdW5kIGluIHJrbnB1X2pvYi5jJwpkID0gZC5yZXBsYWNlKG9sZDIsIG5ldzIsIDEpCgpvcGVuKCdzcmMvcmtucHVfam9iLmMnLCAndycpLndyaXRlKGQpCm9rID0gKAogICAgJ0J1ZyA1NSByZXYgMzUnIGluIGQKICAgIGFuZCAnc21wX21iKCk7JyBpbiBkCiAgICBhbmQgJ3Rhc2tfb2JqLT5rdl9hZGRyO1xuXHQvKiBCdWcgNTUgcmV2IDM1OicgaW4gZAopCnN5cy5leGl0KDAgaWYgb2sgZWxzZSAxKQo=').decode())"
+        echo "BUG55 rev35 patch: OK"
+        echo "BUG55 rev35 cache-buster: 2026-05-02-smp-mb-correct-location"
+
     build:
       - |
         # Diagnostic: confirm Kbuild content visible to the build step.
