@@ -687,6 +687,24 @@ steps:
         echo "BUG55 rev37 patch: OK"
         echo "BUG55 rev37 cache-buster: 2026-05-02-int-mask-fallback"
 
+        # Bug 55 rev 38: fix task_base_addr=0 causing PC_DMA_BASE_ADDR=0.
+        #
+        # librknnrt 2.3.2 never populates task_base_addr in the SUBMIT ioctl
+        # (the field was added to struct rknpu_submit after SDK 2.3.2).  The
+        # unmodified driver writes REG_WRITE(0, PC_DMA_BASE_ADDR), so the NPU
+        # DMA engine tries to fetch the task list from IOMMU address 0 — which
+        # is unmapped.  The NPU DMA faults silently, run_task_counter stays 0,
+        # no completion IRQ fires, job times out after 6s.
+        #
+        # Fix: in rknpu_job_subcore_commit_pc, when args->task_base_addr==0,
+        # derive the DMA base address from task_obj->dma_addr.  task_obj is
+        # already a kernel pointer to the rknpu_mem_object (DMA_HEAP path) or
+        # rknpu_gem_object (DRM_GEM path); its dma_addr / iova_start field holds
+        # the IOMMU address assigned at allocation time.
+        python3 -c "import base64,sys; exec(base64.b64decode(b'aW1wb3J0IHN5cwpkID0gb3Blbignc3JjL3JrbnB1X2pvYi5jJykucmVhZCgpCgpvbGQgPSAnXHRSRUdfV1JJVEUoYXJncy0+dGFza19iYXNlX2FkZHIsIFJLTlBVX09GRlNFVF9QQ19ETUFfQkFTRV9BRERSKTtcbicKbmV3ID0gKAogICAgJ1x0LyogQnVnIDU1IHJldiAzODogbGlicmtubnJ0IDIuMy4yIGxlYXZlcyB0YXNrX2Jhc2VfYWRkcj0wIGluIHRoZSBTVUJNSVRcbicKICAgICdcdCAqIGlvY3RsICh0aGUgZmllbGQgd2FzIGFkZGVkIGFmdGVyIFNESyAyLjMuMiBhbmQgdGhlIGxpYnJhcnkgbmV2ZXJcbicKICAgICdcdCAqIHBvcHVsYXRlcyBpdCkuICBhcmdzLT50YXNrX29ial9hZGRyIGlzIHRoZSBrZXJuZWwgVkEgb2YgdGhlXG4nCiAgICAnXHQgKiBya25wdV9tZW1fb2JqZWN0OyBpdHMgZG1hX2FkZHIgZmllbGQgaG9sZHMgdGhlIElPTU1VIGFkZHJlc3MgdGhlIE5QVVxuJwogICAgJ1x0ICogRE1BIGVuZ2luZSBuZWVkcyB0byBmaW5kIHRoZSB0YXNrIGxpc3QuICBVc2UgaXQgd2hlbiB0YXNrX2Jhc2VfYWRkcj0wXG4nCiAgICAnXHQgKiBzbyBQQ19ETUFfQkFTRV9BRERSIGlzIG5vdCB3cml0dGVuIHdpdGggMCAodW5tYXBwZWQgSU9NTVUgcGFnZSkuICovXG4nCiAgICAnXHR7XG4nCiAgICAnXHRcdHU2NCBfdGJhID0gYXJncy0+dGFza19iYXNlX2FkZHI7XG4nCiAgICAnXHRcdGlmIChfdGJhID09IDApXG4nCiAgICAnXHRcdFx0X3RiYSA9ICh1NjQpdGFza19vYmotPmRtYV9hZGRyO1xuJwogICAgJ1x0XHRMT0dfREVWX0lORk8ocmtucHVfZGV2LT5kZXYsXG4nCiAgICAnXHRcdFx0IkJVRzU1IHIzODogdGJhPTB4JWxseCBkZXJpdmVkPTB4JWxseFxcbiIsXG4nCiAgICAnXHRcdFx0KHU2NClhcmdzLT50YXNrX2Jhc2VfYWRkciwgX3RiYSk7XG4nCiAgICAnXHRcdFJFR19XUklURShfdGJhLCBSS05QVV9PRkZTRVRfUENfRE1BX0JBU0VfQUREUik7XG4nCiAgICAnXHR9XG4nCikKYXNzZXJ0IG9sZCBpbiBkLCAnUEFUQ0ggRkFJTEVEOiBSRUdfV1JJVEUoYXJncy0+dGFza19iYXNlX2FkZHIsIFJLTlBVX09GRlNFVF9QQ19ETUFfQkFTRV9BRERSKSBub3QgZm91bmQgaW4gcmtucHVfam9iLmMnCmQgPSBkLnJlcGxhY2Uob2xkLCBuZXcsIDEpCm9wZW4oJ3NyYy9ya25wdV9qb2IuYycsICd3Jykud3JpdGUoZCkKc3lzLmV4aXQoMCBpZiAnQnVnIDU1IHJldiAzOCcgaW4gZCBhbmQgJ190YmEgPSAodTY0KXRhc2tfb2JqLT5kbWFfYWRkcicgaW4gZCBlbHNlIDEpCg==').decode())"
+        echo "BUG55 rev38 patch: OK"
+        echo "BUG55 rev38 cache-buster: 2026-05-02-task-base-addr-from-dma-heap"
+
     build:
       - |
         # Diagnostic: confirm Kbuild content visible to the build step.
