@@ -541,6 +541,8 @@ steps:
         echo "BUG55 rev27 patch: OK"
         echo "BUG55 rev27 cache-buster: 2026-05-01-restore-iommu-reattach-rockchip"
 
+      - |
+        # Bug 55 patches Rev 34–40 (split here to stay under MAX_ARG_STRLEN=128KB).
         # Bug 55 rev 34: no probe CRU reset, no probe iommu reattach.
         #
         # Rev 33 added iommu_detach_device + iommu_attach_device at probe (without
