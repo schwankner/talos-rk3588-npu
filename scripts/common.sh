@@ -18,7 +18,7 @@ PKGS_COMMIT="${PKGS_COMMIT:-b121566}"
 # Rockchip NPU driver (vendor rknpu, not mainline rocket)
 # Source: https://github.com/w568w/rknpu-module (out-of-tree port to mainline kernel)
 # Version refers to the RKNN SDK ABI level, not a release tag (there are none).
-RKNPU_VERSION="${RKNPU_VERSION:-0.9.11}"
+RKNPU_VERSION="${RKNPU_VERSION:-0.9.12}"
 
 # Rockchip RKNN runtime library (librknnrt.so)
 # Must match RKNPU_VERSION — same SDK release

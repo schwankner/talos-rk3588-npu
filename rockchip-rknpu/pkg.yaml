@@ -639,6 +639,32 @@ steps:
         echo "BUG55 rev35 patch: OK"
         echo "BUG55 rev35 cache-buster: 2026-05-02-smp-mb-correct-location"
 
+        # Bug 55 rev 36: DC IVAC cache invalidation before reading task struct fields.
+        #
+        # smp_mb() (DMB ISH, Rev 35) is necessary but insufficient.  ARM Cortex-A76/A55
+        # TRM: "If a clean cache line exists in the cache for the address being accessed,
+        # a non-cacheable read might return the cached value."  alloc_page(__GFP_ZERO)
+        # zeroes pages via the writeback-cacheable direct map, leaving clean zero lines
+        # in L1/L2/L3.  rknpu_mem.c rev 10's flush_dcache_page() at allocation time
+        # is supposed to remove those lines, but it races against hardware speculative
+        # prefetch that can re-populate them before the job-commit read.  Rev 35's
+        # smp_mb() (DMB ISH) does NOT evict existing clean cache lines -- it only
+        # orders memory accesses.  Result: first_task->regcmd_addr, int_mask, and
+        # regcfg_amount ALL read as zero (DRAM has librknnrt's data but cache serves
+        # stale zeros).  The NPU is programmed with address 0 and regcfg_amount=0;
+        # it executes nothing and never fires a completion IRQ.
+        #
+        # Fix: in rknpu_job_subcore_commit_pc, immediately before reading first_task
+        # and last_task fields, issue:
+        #   DSB ISH     -- ensure EL0 NC stores (librknnrt's mmap writes) are in DRAM
+        #   DC IVAC × N -- Invalidate by VA to PoC for each cache line in the task range
+        #                  (evicts stale clean zeros; leaves DRAM untouched)
+        #   DSB ISH     -- ensure invalidation is globally visible before the loads
+        # The subsequent loads are guaranteed cold misses -> DRAM -> librknnrt's data.
+        python3 -c "import base64,sys; exec(base64.b64decode(b'aW1wb3J0IHN5cwpkID0gb3Blbignc3JjL3JrbnB1X2pvYi5jJykucmVhZCgpCm9sZCA9ICcJc21wX21iKCk7CgoJZmlyc3RfdGFzayA9ICZ0YXNrX2Jhc2VbdGFza19zdGFydF07CicKbmV3ID0gKAogICAgJwkvKgonCiAgICAnCSAqIEJ1ZyA1NSByZXYgMzY6IERDIElWQUMgY2FjaGUgaW52YWxpZGF0aW9uIGJlZm9yZSByZWFkaW5nIHRhc2sgc3RydWN0CicKICAgICcJICogZmllbGRzLiAgbGlicmtubnJ0IHdyaXRlcyB0YXNrIGRhdGEgdmlhIHBncHJvdF93cml0ZWNvbWJpbmUgbW1hcAonCiAgICAnCSAqIChOb3JtYWwtTkMgdG8gRFJBTSkuICBBUk0gQ29ydGV4LUE3Ni9BNTUgVFJNOiAiSWYgYSBjbGVhbiBjYWNoZQonCiAgICAnCSAqIGxpbmUgZXhpc3RzLCBhIG5vbi1jYWNoZWFibGUgcmVhZCBtaWdodCByZXR1cm4gdGhlIGNhY2hlZCB2YWx1ZS4iCicKICAgICcJICogYWxsb2NfcGFnZShfX0dGUF9aRVJPKSBsZWF2ZXMgY2xlYW4gemVybyBsaW5lcyBpbiBMMS9MMi9MMyB2aWEgdGhlCicKICAgICcJICogd3JpdGViYWNrLWNhY2hlYWJsZSBkaXJlY3QgbWFwLiAgcmtucHVfbWVtLmMgcmV2IDEwIGZsdXNoX2RjYWNoZV9wYWdlCicKICAgICcJICogYXQgYWxsb2MgdGltZSByYWNlcyBhZ2FpbnN0IGhhcmR3YXJlIHNwZWN1bGF0aXZlIHByZWZldGNoLgonCiAgICAnCSAqCicKICAgICcJICogU29sdXRpb246IERTQiBJU0ggZHJhaW5zIEVMMCBOQyBzdG9yZXMgc28gRFJBTSBob2xkcyBsaWJya25ucnQncwonCiAgICAnCSAqIGRhdGEuICBEQyBJVkFDIGZvciBlYWNoIGNhY2hlIGxpbmUgaW4gdGhlIHRhc2sgcmFuZ2UgZGlzY2FyZHMgYW55CicKICAgICcJICogc3RhbGUgY2xlYW4gbGluZXMuICBEU0IgSVNIIGFmdGVyIGVuc3VyZXMgaW52YWxpZGF0aW9uIGlzIGdsb2JhbGx5CicKICAgICcJICogdmlzaWJsZSBiZWZvcmUgdGhlIHN1YnNlcXVlbnQgbG9hZHMgKGd1YXJhbnRlZWQgY29sZCBtaXNzZXMgLT4gRFJBTSkuCicKICAgICcJICovCicKICAgICcJewonCiAgICAnCQl1bnNpZ25lZCBsb25nIF9zID0gKCh1bnNpZ25lZCBsb25nKSh0YXNrX2Jhc2UgKyB0YXNrX3N0YXJ0KSkgJiB+NjNVTDsKJwogICAgJwkJdW5zaWduZWQgbG9uZyBfZSA9ICh1bnNpZ25lZCBsb25nKSh0YXNrX2Jhc2UgKyB0YXNrX2VuZCArIDEpOwonCiAgICAnCQl1bnNpZ25lZCBsb25nIF9wOwonCiAgICAnCQlhc20gdm9sYXRpbGUoImRzYiBpc2giIDo6OiAibWVtb3J5Iik7CicKICAgICcJCWZvciAoX3AgPSBfczsgX3AgPCBfZTsgX3AgKz0gNjQpCicKICAgICcJCQlhc20gdm9sYXRpbGUoImRjIGl2YWMsICUwIiA6OiAiciIoX3ApIDogIm1lbW9yeSIpOwonCiAgICAnCQlhc20gdm9sYXRpbGUoImRzYiBpc2giIDo6OiAibWVtb3J5Iik7CicKICAgICcJfQonCiAgICAnCicKICAgICcJZmlyc3RfdGFzayA9ICZ0YXNrX2Jhc2VbdGFza19zdGFydF07CicKKQphc3NlcnQgb2xkIGluIGQsICdQQVRDSCBGQUlMRUQ6IFJldiAzNSBzbXBfbWIgYW5jaG9yIG5vdCBmb3VuZCBpbiBya25wdV9qb2IuYycKZCA9IGQucmVwbGFjZShvbGQsIG5ldywgMSkKb3Blbignc3JjL3JrbnB1X2pvYi5jJywgJ3cnKS53cml0ZShkKQpzeXMuZXhpdCgwIGlmICdCdWcgNTUgcmV2IDM2JyBpbiBkIGFuZCAnZGMgaXZhYycgaW4gZCBlbHNlIDEpCg==').decode())"
+        echo "BUG55 rev36 patch: OK"
+        echo "BUG55 rev36 cache-buster: 2026-05-02-dc-ivac-task-range"
+
     build:
       - |
         # Diagnostic: confirm Kbuild content visible to the build step.
